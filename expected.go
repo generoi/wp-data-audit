@@ -1,0 +1,143 @@
+package audit
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// ContentDir is where a Bedrock repo keeps plugins, mu-plugins and drop-ins.
+const ContentDir = "web/app"
+
+// ExpectedFromRepo reads what a Bedrock checkout deploys: Composer packages
+// by their installer path, plus what git tracks under web/app. The checkout
+// should be at the deployed commit; a branch that adds or drops a plugin
+// shows up as a flag.
+func ExpectedFromRepo(dir string) (*Expected, error) {
+	exp := &Expected{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}}
+
+	var cj struct {
+		Extra struct {
+			InstallerPaths map[string][]string         `json:"installer-paths"`
+			Patches        map[string]json.RawMessage `json:"patches"`
+			PatchesFile    string                     `json:"patches-file"`
+		} `json:"extra"`
+	}
+	if err := readJSON(filepath.Join(dir, "composer.json"), &cj); err != nil {
+		return nil, err
+	}
+	var lock struct {
+		Packages    []lockPackage `json:"packages"`
+		PackagesDev []lockPackage `json:"packages-dev"`
+	}
+	if err := readJSON(filepath.Join(dir, "composer.lock"), &lock); err != nil {
+		return nil, err
+	}
+
+	where := map[string]map[string]bool{"plugins": exp.Plugins, "mu-plugins": exp.MuPlugins}
+	types := map[string]string{}
+	for _, p := range lock.Packages { // packages-dev aren't installed on production
+		types[p.Name] = p.Type
+		if set := where[installDir(p, cj.Extra.InstallerPaths)]; set != nil {
+			set[base(p.Name)] = true
+		}
+	}
+
+	patched := map[string]bool{}
+	for name := range cj.Extra.Patches {
+		patched[name] = true
+	}
+	for _, f := range []string{cj.Extra.PatchesFile, "patches.json"} {
+		if f == "" {
+			continue
+		}
+		var pj struct {
+			Patches map[string]json.RawMessage `json:"patches"`
+		}
+		if err := readJSON(filepath.Join(dir, f), &pj); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		for name := range pj.Patches {
+			patched[name] = true
+		}
+	}
+	for name := range patched {
+		switch {
+		case strings.HasPrefix(name, "roots/wordpress"), name == "johnpbloch/wordpress-core":
+			exp.PatchedCore = true
+		case types[name] == "wordpress-plugin":
+			exp.PatchedPlugins[base(name)] = true
+		}
+	}
+
+	out, err := exec.Command("git", "-C", dir, "ls-files", "-z", "--", ContentDir).Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	for _, p := range strings.Split(string(out), "\x00") {
+		rest, ok := strings.CutPrefix(p, ContentDir+"/")
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(rest, "/", 3)
+		switch {
+		case len(parts) == 1 && strings.HasSuffix(parts[0], ".php"):
+			exp.Dropins[parts[0]] = true
+		case len(parts) >= 2 && where[parts[0]] != nil:
+			where[parts[0]][parts[1]] = true
+		}
+	}
+	return exp, nil
+}
+
+type lockPackage struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// installDir is "plugins" or "mu-plugins" for a package that installs there.
+// A path naming the package wins over one matching its type, as composer
+// projects list single packages to move them out of their type's folder.
+func installDir(p lockPackage, paths map[string][]string) string {
+	byType := ""
+	for path, rules := range paths {
+		for _, r := range rules {
+			if r == p.Name {
+				return contentSub(path)
+			}
+			if r == "type:"+p.Type && byType == "" {
+				byType = contentSub(path)
+			}
+		}
+	}
+	return byType
+}
+
+func contentSub(path string) string {
+	rest, ok := strings.CutPrefix(path, ContentDir+"/")
+	if !ok {
+		return ""
+	}
+	sub, _, _ := strings.Cut(rest, "/")
+	return sub
+}
+
+func base(name string) string {
+	_, b, _ := strings.Cut(name, "/")
+	return b
+}
+
+func readJSON(path string, v any) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
