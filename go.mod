@@ -1,6 +1,6 @@
 module github.com/generoi/wp-data-audit
 
-go 1.26.10
+go 1.26.0
 
 require github.com/oschwald/maxminddb-golang/v2 v2.9.0
 
