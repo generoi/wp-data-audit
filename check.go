@@ -59,8 +59,8 @@ type Site struct {
 
 // Repo is what the site's repo says: what it deploys (plugin, mu-plugin and
 // drop-in names, and what carries a patch, whose checksums are expected to
-// fail) and its composer.json `extra.data-audit`: the roles anyone can get
-// per site and the client's email domains.
+// fail) and its SettingsFile: the roles anyone can get per site and the
+// client's email domains.
 type Repo struct {
 	Plugins, MuPlugins, Dropins map[string]bool
 	PatchedPlugins              map[string]bool

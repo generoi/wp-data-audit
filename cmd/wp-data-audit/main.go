@@ -27,7 +27,7 @@ const usage = `usage:
       download the DB-IP Lite country database
 
 --wp replaces "vendor/bin/wp @<env>", e.g. --env local --wp "ddev wp".
-Config: ~/.config/wp-data-audit/config.json; per site: composer.json extra.data-audit.
+Config: ~/.config/wp-data-audit/config.json; per site: data-audit.json in the repo.
 State: ~/.local/state/wp-data-audit/<site>/<env>/.
 `
 

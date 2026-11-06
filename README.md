@@ -10,7 +10,7 @@ It flags:
 
 - accounts with a role the public can't get: new ones or changed roles
   urgently, email domains outside the staff and client domains. Only
-  `customer` on WooCommerce sites and the roles a repo declares are public,
+  `customer` on WooCommerce sites and the roles a repo's `data-audit.json` declares are public,
   so a subscriber on a site without sign-ups is flagged too
 - capabilities granted outside a user's roles (role injection)
 - open registration, urgently when the default role can do more than read
@@ -46,15 +46,14 @@ wp-data-audit --env local --wp "ddev wp"   # try it on the local copy
 The first run lists everything there is (all admins, every embed): accept the
 expected ones once, and later runs show only what's new or changed.
 
-What's true for one site lives in its repo's `composer.json`; public-roles
-keys are a site's host, or its blog id on a multisite:
+What's true for one site lives in its repo, in `data-audit.json` at the root
+(not composer.json: Composer's lock hash covers `extra`). `public_roles` keys
+are a site's host, or its blog id on a multisite:
 
 ```json
-"extra": {
-  "data-audit": {
-    "public-roles": { "members.example": ["subscriber"] },
-    "client-domains": ["client.example"]
-  }
+{
+  "public_roles": { "members.example": ["subscriber"] },
+  "client_domains": ["client.example"]
 }
 ```
 

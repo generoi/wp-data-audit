@@ -13,18 +13,21 @@ import (
 // ContentDir is where a Bedrock repo keeps plugins, mu-plugins and drop-ins.
 const ContentDir = "web/app"
 
-// ReadRepo reads a Bedrock checkout: what it deploys (Composer packages by
-// their installer path, plus what git tracks under web/app) and composer.json
-// `extra.data-audit`:
+// SettingsFile is the repo's own audit settings, at its root:
 //
-//	"data-audit": {
-//	    "public-roles": {"members.example": ["subscriber"]},
-//	    "client-domains": ["client.example"]
+//	{
+//	    "public_roles": {"members.example": ["subscriber"]},
+//	    "client_domains": ["client.example"]
 //	}
 //
-// public-roles keys are a site's host or, on a multisite, its blog id. The
-// checkout should be at the deployed commit: a branch that adds or drops a
-// plugin shows up as a flag.
+// public_roles keys are a site's host or, on a multisite, its blog id. A file
+// of its own, not composer.json: Composer's lock hash covers `extra`.
+const SettingsFile = "data-audit.json"
+
+// ReadRepo reads a Bedrock checkout: what it deploys (Composer packages by
+// their installer path, plus what git tracks under web/app) and its
+// SettingsFile. The checkout should be at the deployed commit: a branch that
+// adds or drops a plugin shows up as a flag.
 func ReadRepo(dir string) (*Repo, error) {
 	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}}
 
@@ -34,17 +37,20 @@ func ReadRepo(dir string) (*Repo, error) {
 			DropinPaths    map[string][]string        `json:"dropin-paths"`
 			Patches        map[string]json.RawMessage `json:"patches"`
 			PatchesFile    string                     `json:"patches-file"`
-			DataAudit      struct {
-				PublicRoles   map[string][]string `json:"public-roles"`
-				ClientDomains []string            `json:"client-domains"`
-			} `json:"data-audit"`
 		} `json:"extra"`
 	}
 	if err := readJSON(filepath.Join(dir, "composer.json"), &cj); err != nil {
 		return nil, err
 	}
-	exp.PublicRoles = cj.Extra.DataAudit.PublicRoles
-	exp.ClientDomains = cj.Extra.DataAudit.ClientDomains
+	var settings struct {
+		PublicRoles   map[string][]string `json:"public_roles"`
+		ClientDomains []string            `json:"client_domains"`
+	}
+	if err := readJSON(filepath.Join(dir, SettingsFile), &settings); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	exp.PublicRoles = settings.PublicRoles
+	exp.ClientDomains = settings.ClientDomains
 	var lock struct {
 		Packages    []lockPackage `json:"packages"`
 		PackagesDev []lockPackage `json:"packages-dev"`

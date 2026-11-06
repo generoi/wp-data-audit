@@ -162,8 +162,8 @@ func TestReadRepo(t *testing.T) {
 		"web/app/mu-plugins/{$name}/":["type:wordpress-muplugin","wp-plugin/moved"],
 		"web/app/plugins/{$name}/":["type:wordpress-plugin"]},
 		"dropin-paths":{"web/app/":["package:wp-plugin/cache:wp-cache-phase1.php"],"web/app/mu-plugins":["package:vendor/cli:plugin/login-server.php"]},
-		"patches":{"wp-plugin/fixed":{},"roots/wordpress-no-content":{}},
-		"data-audit":{"public-roles":{"members.example":["subscriber"]},"client-domains":["client.example"]}}}`)
+		"patches":{"wp-plugin/fixed":{},"roots/wordpress-no-content":{}}}}`)
+	write("data-audit.json", `{"public_roles":{"members.example":["subscriber"]},"client_domains":["client.example"]}`)
 	write("composer.lock", `{"packages":[
 		{"name":"wp-plugin/fixed","type":"wordpress-plugin"},
 		{"name":"wp-plugin/moved","type":"wordpress-plugin"},
