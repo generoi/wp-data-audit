@@ -13,23 +13,38 @@ import (
 // ContentDir is where a Bedrock repo keeps plugins, mu-plugins and drop-ins.
 const ContentDir = "web/app"
 
-// ExpectedFromRepo reads what a Bedrock checkout deploys: Composer packages
-// by their installer path, plus what git tracks under web/app. The checkout
-// should be at the deployed commit; a branch that adds or drops a plugin
-// shows up as a flag.
-func ExpectedFromRepo(dir string) (*Expected, error) {
-	exp := &Expected{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}}
+// ReadRepo reads a Bedrock checkout: what it deploys (Composer packages by
+// their installer path, plus what git tracks under web/app) and composer.json
+// `extra.data-audit`:
+//
+//	"data-audit": {
+//	    "public-roles": {"members.example": ["subscriber"]},
+//	    "client-domains": ["client.example"]
+//	}
+//
+// public-roles keys are a site's host or, on a multisite, its blog id. The
+// checkout should be at the deployed commit: a branch that adds or drops a
+// plugin shows up as a flag.
+func ReadRepo(dir string) (*Repo, error) {
+	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}}
 
 	var cj struct {
 		Extra struct {
-			InstallerPaths map[string][]string         `json:"installer-paths"`
+			InstallerPaths map[string][]string        `json:"installer-paths"`
+			DropinPaths    map[string][]string        `json:"dropin-paths"`
 			Patches        map[string]json.RawMessage `json:"patches"`
 			PatchesFile    string                     `json:"patches-file"`
+			DataAudit      struct {
+				PublicRoles   map[string][]string `json:"public-roles"`
+				ClientDomains []string            `json:"client-domains"`
+			} `json:"data-audit"`
 		} `json:"extra"`
 	}
 	if err := readJSON(filepath.Join(dir, "composer.json"), &cj); err != nil {
 		return nil, err
 	}
+	exp.PublicRoles = cj.Extra.DataAudit.PublicRoles
+	exp.ClientDomains = cj.Extra.DataAudit.ClientDomains
 	var lock struct {
 		Packages    []lockPackage `json:"packages"`
 		PackagesDev []lockPackage `json:"packages-dev"`
@@ -44,6 +59,23 @@ func ExpectedFromRepo(dir string) (*Expected, error) {
 		types[p.Name] = p.Type
 		if set := where[installDir(p, cj.Extra.InstallerPaths)]; set != nil {
 			set[base(p.Name)] = true
+		}
+	}
+
+	// koodimonni/composer-dropin-installer copies single files from a package:
+	// "web/app/mu-plugins": ["package:vendor/name:path/file.php"].
+	for dir, rules := range cj.Extra.DropinPaths {
+		sub := contentSub(strings.TrimSuffix(dir, "/") + "/")
+		set := where[sub]
+		if strings.TrimSuffix(dir, "/") == ContentDir {
+			set = exp.Dropins
+		}
+		for _, r := range rules {
+			if rest, ok := strings.CutPrefix(r, "package:"); ok && set != nil {
+				if _, file, ok := strings.Cut(rest, ":"); ok {
+					set[filepath.Base(file)] = true
+				}
+			}
 		}
 	}
 

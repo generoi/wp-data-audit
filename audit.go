@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -19,27 +21,38 @@ import (
 //go:embed collector.php
 var collector string
 
-// DefaultLowRoles are the roles only counted, never listed.
-var DefaultLowRoles = []string{"subscriber", "customer"}
+var (
+	roleRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
+	siteRE = regexp.MustCompile(`^[a-z0-9.-]+$`)
+)
 
-var roleRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
-
-// Script is the PHP to pipe to `wp eval-file -` on the site. lowRoles are
-// added to DefaultLowRoles: roles whose users are only counted, such as a
-// membership site's member role.
-func Script(lowRoles []string) (string, error) {
-	roles := append([]string{}, DefaultLowRoles...)
-	for _, r := range lowRoles {
-		if !roleRE.MatchString(r) {
-			return "", fmt.Errorf("role %q: want lowercase letters, digits, _ and -", r)
+// Script is the PHP to pipe to `wp eval-file -` on the site. publicRoles
+// are the roles anyone can get, by site host (or blog id on a multisite):
+// their users are only counted. `customer` is public wherever WooCommerce
+// runs; every other role is listed, so a subscriber on a site without
+// sign-ups gets flagged.
+func Script(publicRoles map[string][]string) (string, error) {
+	var b strings.Builder
+	b.WriteString("<?php\n$wpda_public_roles = [")
+	for _, site := range slices.Sorted(maps.Keys(publicRoles)) {
+		if !siteRE.MatchString(site) {
+			return "", fmt.Errorf("public roles: site %q: want a host or blog id", site)
 		}
-		roles = append(roles, r)
+		fmt.Fprintf(&b, "'%s' => [", site)
+		for _, r := range publicRoles[site] {
+			if !roleRE.MatchString(r) {
+				return "", fmt.Errorf("public roles: role %q: want lowercase letters, digits, _ and -", r)
+			}
+			fmt.Fprintf(&b, "'%s', ", r)
+		}
+		b.WriteString("], ")
 	}
+	b.WriteString("];\n")
 	body, ok := strings.CutPrefix(collector, "<?php")
 	if !ok {
 		return "", errors.New("collector.php doesn't start with <?php")
 	}
-	return "<?php\n$wpda_low_roles = ['" + strings.Join(roles, "', '") + "'];\n" + body, nil
+	return b.String() + body, nil
 }
 
 // Parse reads the snapshot from the collector's output, ignoring anything
@@ -90,8 +103,11 @@ type Registration struct {
 	RoleCaps  []string `json:"default_role_caps"`
 }
 
-// User is a user holding a role outside the low roles, a capability outside
-// their roles, or an application password.
+// User is a user holding a role outside the site's public roles, a
+// capability outside their roles, or an application password. On a multisite,
+// roles and capabilities from sites other than the main one are prefixed
+// "<blog id>:"; network admins have the role super_admin. Privileged is set
+// when any role isn't public.
 type User struct {
 	ID           int           `json:"id"`
 	Login        string        `json:"login"`
@@ -120,6 +136,7 @@ type AppPassword struct {
 }
 
 type WooKey struct {
+	Blog         int    `json:"blog"`
 	ID           int    `json:"key_id"`
 	UserID       int    `json:"user_id"`
 	Description  string `json:"description"`
@@ -141,6 +158,7 @@ type Match struct {
 }
 
 type Location struct {
+	Blog  int    `json:"blog"`
 	Table string `json:"table"`
 	ID    int64  `json:"id"`
 	Field string `json:"field"`

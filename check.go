@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"net/netip"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -45,20 +48,25 @@ func (r Report) Urgent() int {
 	return n
 }
 
-// Site is what Check needs to know about the site and its owners.
+// Site is what Check needs to know beyond the repo: who runs the sites, from
+// where, and what a person accepted.
 type Site struct {
 	AllowedCountries []string        // ISO codes; empty skips the session country check
+	AllowedIPs       []string        // IPs or CIDR ranges never flagged, whatever their country
 	StaffDomains     []string        // email domains of the people who run the site
-	ClientDomains    []string        // the client's own email domains
 	Accepted         map[string]bool // flag IDs a person accepted
 }
 
-// Expected is what the repo deploys: plugin, mu-plugin and drop-in names,
-// and what carries a patch (its checksums are expected to fail).
-type Expected struct {
+// Repo is what the site's repo says: what it deploys (plugin, mu-plugin and
+// drop-in names, and what carries a patch, whose checksums are expected to
+// fail) and its composer.json `extra.data-audit`: the roles anyone can get
+// per site and the client's email domains.
+type Repo struct {
 	Plugins, MuPlugins, Dropins map[string]bool
 	PatchedPlugins              map[string]bool
 	PatchedCore                 bool
+	PublicRoles                 map[string][]string
+	ClientDomains               []string
 }
 
 // Geo resolves an IP to an ISO country code, "" when unknown.
@@ -66,16 +74,32 @@ type Geo interface {
 	Country(ip string) string
 }
 
+// Deploys delete these to hide the WordPress version; missing is fine.
+var removedOnPurpose = regexp.MustCompile(`File doesn't exist: (readme\.html|license\.txt|wp-config-sample\.php)$`)
+
 // Kinsta installs its own must-use plugin on every site.
 var hostMuPlugins = map[string]bool{"kinsta-mu-plugins": true, "kinsta-mu-plugins.php": true}
 
 // Check compares cur with prev (nil on the first run) and returns the flags
 // not yet accepted. exp nil skips the file comparison, geo nil the session
 // countries.
-func Check(prev, cur *Snapshot, site Site, exp *Expected, geo Geo) Report {
+func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 	c := &checker{site: site}
+	for _, s := range site.AllowedIPs {
+		if p, err := netip.ParsePrefix(s); err == nil {
+			c.ips = append(c.ips, p)
+		} else if a, err := netip.ParseAddr(s); err == nil {
+			c.ips = append(c.ips, netip.PrefixFrom(a, a.BitLen()))
+		} else {
+			c.note("allowed IP " + s + " isn't an IP or CIDR range")
+		}
+	}
+	var clients []string
+	if exp != nil {
+		clients = exp.ClientDomains
+	}
 	c.registration(cur)
-	c.users(prev, cur, geo)
+	c.users(prev, cur, clients, geo)
 	c.wooKeys(prev, cur)
 	c.options(prev, cur)
 	c.files(cur, exp)
@@ -96,7 +120,13 @@ func Check(prev, cur *Snapshot, site Site, exp *Expected, geo Geo) Report {
 
 type checker struct {
 	site Site
+	ips  []netip.Prefix
 	r    Report
+}
+
+func (c *checker) allowedIP(ip string) bool {
+	a, err := netip.ParseAddr(ip)
+	return err == nil && slices.ContainsFunc(c.ips, func(p netip.Prefix) bool { return p.Contains(a) })
 }
 
 func (c *checker) flag(f Flag) {
@@ -132,7 +162,7 @@ func (c *checker) registration(cur *Snapshot) {
 	})
 }
 
-func (c *checker) users(prev, cur *Snapshot, geo Geo) {
+func (c *checker) users(prev, cur *Snapshot, clients []string, geo Geo) {
 	before := map[int]User{}
 	appBefore := map[string]bool{}
 	if prev != nil {
@@ -143,7 +173,7 @@ func (c *checker) users(prev, cur *Snapshot, geo Geo) {
 			}
 		}
 	}
-	known := append(append([]string{}, c.site.StaffDomains...), c.site.ClientDomains...)
+	known := append(append([]string{}, c.site.StaffDomains...), clients...)
 	if len(known) == 0 {
 		c.note("no staff or client email domains configured: email domains not checked")
 	}
@@ -158,9 +188,9 @@ func (c *checker) users(prev, cur *Snapshot, geo Geo) {
 			roles := slices.Sorted(slices.Values(u.Roles))
 			p, had := before[u.ID]
 			changed := prev != nil && (!had || !p.Privileged || !slices.Equal(slices.Sorted(slices.Values(p.Roles)), roles))
-			msg := "privileged user"
+			msg := "account with a role the public can't get"
 			if changed {
-				msg = "new privileged user, or its roles changed"
+				msg = "new account with a role the public can't get, or its roles changed"
 			}
 			outside := len(known) > 0 && !domainIn(u.Email, known)
 			if outside {
@@ -196,6 +226,9 @@ func (c *checker) sessions(u User, who string, geo Geo) {
 	}
 	seen := map[string]bool{}
 	for _, s := range u.Sessions {
+		if c.allowedIP(s.IP) {
+			continue
+		}
 		cc := geo.Country(s.IP)
 		if cc == "" || slices.Contains(c.site.AllowedCountries, cc) || seen[cc] {
 			continue
@@ -203,23 +236,23 @@ func (c *checker) sessions(u User, who string, geo Geo) {
 		seen[cc] = true
 		c.flag(Flag{
 			ID: fmt.Sprintf("session:%d:%s", u.ID, cc), Severity: Review, Kind: "session",
-			Message:   "privileged session from a country outside the allowed list: " + cc,
+			Message:   "login session from a country outside the allowed list: " + cc,
 			Untrusted: fmt.Sprintf("%s; IP %s, logged in %s, %s", who, s.IP, ts(s.Login), s.UA),
 		})
 	}
 }
 
 func (c *checker) wooKeys(prev, cur *Snapshot) {
-	before := map[int]bool{}
+	before := map[[2]int]bool{}
 	if prev != nil {
 		for _, k := range prev.WooKeys {
-			before[k.ID] = true
+			before[[2]int{k.Blog, k.ID}] = true
 		}
 	}
 	for _, k := range cur.WooKeys {
-		isNew := prev != nil && !before[k.ID]
+		isNew := prev != nil && !before[[2]int{k.Blog, k.ID}]
 		c.flag(Flag{
-			ID: fmt.Sprintf("woo-key:%d:%s", k.ID, k.TruncatedKey), Severity: sev(isNew && k.Permissions != "read"), Kind: "woo-key",
+			ID: fmt.Sprintf("woo-key:%d:%d:%s", k.Blog, k.ID, k.TruncatedKey), Severity: sev(isNew && k.Permissions != "read"), Kind: "woo-key",
 			Message:   "WooCommerce REST API key with " + k.Permissions + " access",
 			Untrusted: fmt.Sprintf("user %d, %q, last access %s", k.UserID, k.Description, k.LastAccess),
 		})
@@ -230,7 +263,13 @@ func (c *checker) options(prev, cur *Snapshot) {
 	if prev == nil {
 		return
 	}
-	for _, k := range []string{"siteurl", "home", "admin_email"} {
+	keys := slices.Sorted(maps.Keys(cur.Options))
+	for k := range prev.Options {
+		if _, ok := cur.Options[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	for _, k := range keys {
 		if was, now := prev.Options[k], cur.Options[k]; was != now {
 			c.flag(Flag{
 				ID: "option:" + k + ":" + short(now), Severity: Urgent, Kind: "option",
@@ -240,7 +279,7 @@ func (c *checker) options(prev, cur *Snapshot) {
 	}
 }
 
-func (c *checker) files(cur *Snapshot, exp *Expected) {
+func (c *checker) files(cur *Snapshot, exp *Repo) {
 	f := cur.Files
 	for _, u := range f.UploadsPHP {
 		if u.Silence {
@@ -279,9 +318,12 @@ func (c *checker) files(cur *Snapshot, exp *Expected) {
 	}
 }
 
-func (c *checker) checksums(cur *Snapshot, exp *Expected) {
+func (c *checker) checksums(cur *Snapshot, exp *Repo) {
 	if exp == nil || !exp.PatchedCore {
 		for _, l := range cur.Checksums.Core {
+			if removedOnPurpose.MatchString(l) || strings.Contains(l, "installation doesn't verify against checksums") {
+				continue // the summary line; the warnings around it are the findings
+			}
 			c.flag(Flag{ID: "core-checksum:" + short(l), Severity: Urgent, Kind: "checksum", Message: "WordPress core file fails its checksum", Untrusted: l})
 		}
 	}
@@ -300,14 +342,19 @@ func (c *checker) content(cur *Snapshot) {
 	for _, m := range cur.Content {
 		var where []string
 		for _, x := range m.At {
+			w := ""
+			if cur.Multisite {
+				w = fmt.Sprintf("blog %d ", x.Blog)
+			}
 			switch {
 			case x.Table == "options":
-				where = append(where, "option "+x.Key)
+				w += "option " + x.Key
 			case x.Key != "":
-				where = append(where, fmt.Sprintf("%s %d %s", x.Table, x.ID, x.Key))
+				w += fmt.Sprintf("%s %d %s", x.Table, x.ID, x.Key)
 			default:
-				where = append(where, fmt.Sprintf("%s %d %s", x.Table, x.ID, x.Field))
+				w += fmt.Sprintf("%s %d %s", x.Table, x.ID, x.Field)
 			}
+			where = append(where, w)
 		}
 		if more := m.Count - len(m.At); more > 0 {
 			where = append(where, fmt.Sprintf("and %d more", more))

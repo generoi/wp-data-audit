@@ -50,10 +50,31 @@ func TestFirstRunFlagsForReviewThenAcceptSilences(t *testing.T) {
 	}
 }
 
+func TestAllowedIPSkipsItsCountryOnly(t *testing.T) {
+	cur := base0()
+	cur.Users[0].Sessions = []Session{{IP: "198.51.100.7"}, {IP: "198.51.100.8"}}
+	geo := fakeGeo{"198.51.100.7": "UY", "198.51.100.8": "UY"}
+	site := Site{AllowedCountries: []string{"FI"}, AllowedIPs: []string{"198.51.100.7"}}
+	r := Check(nil, cur, site, nil, geo)
+	if _, ok := ids(r)["session:1:UY"]; !ok {
+		t.Fatalf("a second IP from the allowed IP's country wasn't flagged: %v", r.Flags)
+	}
+	site.AllowedIPs = []string{"198.51.100.0/24"}
+	if _, ok := ids(Check(nil, cur, site, nil, geo))["session:1:UY"]; ok {
+		t.Fatal("sessions inside an allowed range were flagged")
+	}
+}
+
 func TestNewAdminOutsideDomainsIsUrgent(t *testing.T) {
 	cur := base0()
 	cur.Users = append(cur.Users, User{ID: 7, Login: "x", Email: "x@mail.example", Roles: []string{"administrator"}, Privileged: true})
-	r := Check(base0(), cur, Site{StaffDomains: []string{"staff.example"}}, nil, nil)
+	cur.Users = append(cur.Users, User{ID: 8, Login: "y", Email: "y@client.example", Roles: []string{"editor"}, Privileged: true})
+	r := Check(base0(), cur, Site{StaffDomains: []string{"staff.example"}}, &Repo{ClientDomains: []string{"client.example"}}, nil)
+	for _, f := range r.Flags {
+		if strings.HasPrefix(f.ID, "user:8:") && strings.Contains(f.Message, "outside") {
+			t.Errorf("client domain counted as outside: %+v", f)
+		}
+	}
 	for _, f := range r.Flags {
 		if strings.HasPrefix(f.ID, "user:7:") {
 			if f.Severity != Urgent || !strings.Contains(f.Message, "outside") {
@@ -97,7 +118,7 @@ func TestUrgentSignals(t *testing.T) {
 		{Kind: "script-src", Hash: "h1", Snippet: "tags.example", Count: 2, At: []Location{{Table: "posts", ID: 3, Field: "post_content"}, {Table: "options", Key: "widget"}}},
 		{Kind: "script-inline", Hash: "h2", Encoded: true, Count: 1, At: []Location{{Table: "posts", ID: 4, Field: "post_content"}}},
 	}
-	exp := &Expected{
+	exp := &Repo{
 		Plugins: map[string]bool{"akismet": true}, MuPlugins: map[string]bool{"ours.php": true},
 		Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{"patched": true},
 	}
@@ -126,7 +147,7 @@ func TestUrgentSignals(t *testing.T) {
 	}
 }
 
-func TestExpectedFromRepo(t *testing.T) {
+func TestReadRepo(t *testing.T) {
 	dir := t.TempDir()
 	write := func(p, s string) {
 		t.Helper()
@@ -140,7 +161,9 @@ func TestExpectedFromRepo(t *testing.T) {
 	write("composer.json", `{"extra":{"installer-paths":{
 		"web/app/mu-plugins/{$name}/":["type:wordpress-muplugin","wp-plugin/moved"],
 		"web/app/plugins/{$name}/":["type:wordpress-plugin"]},
-		"patches":{"wp-plugin/fixed":{},"roots/wordpress-no-content":{}}}}`)
+		"dropin-paths":{"web/app/":["package:wp-plugin/cache:wp-cache-phase1.php"],"web/app/mu-plugins":["package:vendor/cli:plugin/login-server.php"]},
+		"patches":{"wp-plugin/fixed":{},"roots/wordpress-no-content":{}},
+		"data-audit":{"public-roles":{"members.example":["subscriber"]},"client-domains":["client.example"]}}}`)
 	write("composer.lock", `{"packages":[
 		{"name":"wp-plugin/fixed","type":"wordpress-plugin"},
 		{"name":"wp-plugin/moved","type":"wordpress-plugin"},
@@ -155,7 +178,7 @@ func TestExpectedFromRepo(t *testing.T) {
 			t.Fatalf("git %v: %v %s", args, err, out)
 		}
 	}
-	exp, err := ExpectedFromRepo(dir)
+	exp, err := ReadRepo(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,24 +194,30 @@ func TestExpectedFromRepo(t *testing.T) {
 		}
 	}
 	check("plugins", exp.Plugins, "fixed", "custom")
-	check("mu-plugins", exp.MuPlugins, "moved", "mu", "local.php")
-	check("dropins", exp.Dropins, "object-cache.php")
+	check("mu-plugins", exp.MuPlugins, "moved", "mu", "local.php", "login-server.php")
+	check("dropins", exp.Dropins, "object-cache.php", "wp-cache-phase1.php")
 	check("patched", exp.PatchedPlugins, "fixed")
 	if !exp.PatchedCore {
 		t.Error("core patch not seen")
 	}
+	if got := exp.PublicRoles["members.example"]; len(got) != 1 || got[0] != "subscriber" || len(exp.ClientDomains) != 1 {
+		t.Errorf("data-audit settings: %v %v", exp.PublicRoles, exp.ClientDomains)
+	}
 }
 
 func TestScriptAndParse(t *testing.T) {
-	s, err := Script([]string{"member"})
+	s, err := Script(map[string][]string{"members.example": {"subscriber"}, "3": {"member"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(s, "<?php\n$wpda_low_roles = ['subscriber', 'customer', 'member'];\n") {
+	if !strings.HasPrefix(s, "<?php\n$wpda_public_roles = ['3' => ['member', ], 'members.example' => ['subscriber', ], ];\n") {
 		t.Fatalf("script head: %.120s", s)
 	}
-	if _, err := Script([]string{"x'];system('id');//"}); err == nil {
+	if _, err := Script(map[string][]string{"x": {"x'];system('id');//"}}); err == nil {
 		t.Fatal("a role with quotes went into the script")
+	}
+	if _, err := Script(map[string][]string{"x'] + [": {"a"}}); err == nil {
+		t.Fatal("a site with quotes went into the script")
 	}
 	if php, err := exec.LookPath("php"); err == nil {
 		f := filepath.Join(t.TempDir(), "c.php")

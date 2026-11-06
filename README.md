@@ -8,14 +8,15 @@ model is involved: a clean site costs nothing to check.
 
 It flags:
 
-- privileged users (any role outside `subscriber`, `customer` and the site's
-  low roles): new ones or changed roles urgently, email domains outside the
-  staff and client domains
+- accounts with a role the public can't get: new ones or changed roles
+  urgently, email domains outside the staff and client domains. Only
+  `customer` on WooCommerce sites and the roles a repo declares are public,
+  so a subscriber on a site without sign-ups is flagged too
 - capabilities granted outside a user's roles (role injection)
 - open registration, urgently when the default role can do more than read
 - application passwords and WooCommerce REST API keys
-- privileged sessions from countries outside the allowed list (local DB-IP
-  Lite lookup, no IP leaves the machine)
+- login sessions of listed accounts from countries outside the allowed list,
+  except allowed IPs (local DB-IP Lite lookup, no IP leaves the machine)
 - changes to `siteurl`, `home` and `admin_email`
 - PHP files under uploads; plugins, mu-plugins and drop-ins the repo doesn't
   deploy
@@ -24,7 +25,10 @@ It flags:
 - scripts, iframes, `javascript:` and `data:` URLs, PHP calls and hidden links in
   posts, meta, options, terms and approved comments, plain or encoded
 
-Customers and other low-role users are only counted. Content is never copied,
+On a multisite every site is covered; facts from sites other than the main
+one are tagged with their blog id, and network admins show as `super_admin`.
+
+Users with only public roles are only counted. Content is never copied,
 only the match (a script's host, an iframe's host, an inline script cut short),
 so one accepted value is accepted wherever it appears.
 
@@ -42,16 +46,25 @@ wp-data-audit --env local --wp "ddev wp"   # try it on the local copy
 The first run lists everything there is (all admins, every embed): accept the
 expected ones once, and later runs show only what's new or changed.
 
-Config, `~/.config/wp-data-audit/config.json` (keep client details here, not
-in this repo):
+What's true for one site lives in its repo's `composer.json`; public-roles
+keys are a site's host, or its blog id on a multisite:
+
+```json
+"extra": {
+  "data-audit": {
+    "public-roles": { "members.example": ["subscriber"] },
+    "client-domains": ["client.example"]
+  }
+}
+```
+
+What's true for every site lives in `~/.config/wp-data-audit/config.json`:
 
 ```json
 {
   "allowed_countries": ["FI", "SE"],
-  "staff_domains": ["agency.example"],
-  "sites": {
-    "site": { "client_domains": ["client.example"], "low_roles": ["member"] }
-  }
+  "allowed_ips": ["198.51.100.7", "203.0.113.0/24"],
+  "staff_domains": ["agency.example"]
 }
 ```
 
@@ -61,10 +74,12 @@ emails and login IPs).
 
 ## As a library
 
-`audit.Script` returns the PHP to pipe, `audit.Parse` reads its output,
-`audit.ExpectedFromRepo` reads what a checkout deploys and `audit.Check` returns
-the flags. `Flag.Untrusted` is text from the site, possibly written by an
-attacker: show it as data, and keep accepting flags a person's decision.
+`runner.Prepare` reads the repo and returns the PHP to pipe however you reach
+the site; `Run.Finish` judges the output and saves snapshot and report in the
+same state the CLI uses, and `runner.Accept` records a decision. Underneath,
+`audit.Script`, `audit.Parse`, `audit.ReadRepo` and `audit.Check` do one step
+each. `Flag.Untrusted` is text from the site, possibly written by an attacker:
+show it as data, and keep accepting flags a person's decision.
 
 ## Licence
 

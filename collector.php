@@ -2,22 +2,50 @@
 
 /*
  * wp-data-audit collector, piped to `wp eval-file -`. wp-data-audit puts
- * $wpda_low_roles above this file. Read-only: it changes nothing on the site
- * and prints facts as JSON between WPDA-BEGIN and WPDA-END. Judging them is
- * the Go side's job, so rules change without touching sites.
+ * $wpda_public_roles above this file. Read-only: it changes nothing on the
+ * site and prints facts as JSON between WPDA-BEGIN and WPDA-END. Judging them
+ * is the Go side's job, so rules change without touching sites.
  *
- * Personal data is kept to what an audit needs: users holding a role outside
- * $wpda_low_roles (or extra capabilities, or application passwords) are
- * listed, everyone else is only counted. Content is never printed, only what
+ * Personal data is kept to what an audit needs. Public roles are the ones
+ * anyone can get on a site: `customer` where WooCommerce runs, plus what the
+ * repo declares per site (host or blog id => roles). Users holding only
+ * public roles are counted; everyone else (and anyone with extra capabilities
+ * or application passwords) is listed. Content is never printed, only what
  * matched, cut short.
  */
 
 global $wpdb;
 
-$wpda_low_roles = isset($wpda_low_roles) && is_array($wpda_low_roles) ? $wpda_low_roles : ['subscriber', 'customer'];
+$wpda_public_roles = isset($wpda_public_roles) && is_array($wpda_public_roles) ? $wpda_public_roles : [];
+$wpda_public = function (int $blog) use ($wpda_public_roles): array {
+    $host = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
+    $roles = array_merge($wpda_public_roles[$host] ?? [], $wpda_public_roles[(string) $blog] ?? []);
+    if (get_option('woocommerce_version')) {
+        $roles[] = 'customer';
+    }
+
+    return $roles;
+};
 $wpda_errors = [];
 $wpda_rows = 2000;    // per content query; reaching it marks the scan truncated
 $wpda_max = 500;      // matches, upload files
+
+// On a multisite, per-site facts (options, roles, content, WooCommerce keys)
+// are collected for every site; anything from a site other than the main
+// one is tagged "<blog id>:".
+$wpda_main = is_multisite() ? (int) get_main_site_id() : (int) get_current_blog_id();
+$wpda_blogs = is_multisite() ? array_map('intval', get_sites(['fields' => 'ids', 'number' => 0, 'deleted' => 0])) : [$wpda_main];
+$wpda_tag = fn (int $blog, string $s): string => $blog === $wpda_main ? $s : "{$blog}:{$s}";
+$wpda_each = function (callable $fn) use ($wpda_blogs) {
+    foreach ($wpda_blogs as $blog) {
+        is_multisite() && switch_to_blog($blog);
+        try {
+            $fn($blog);
+        } finally {
+            is_multisite() && restore_current_blog();
+        }
+    }
+};
 
 $wpda = [
     'version' => 1,
@@ -26,50 +54,75 @@ $wpda = [
     'wp_version' => (string) get_bloginfo('version'),
     'woocommerce' => class_exists('WooCommerce'),
     'multisite' => is_multisite(),
-    'options' => (object) [
-        'siteurl' => (string) get_option('siteurl'),
-        'home' => (string) get_option('home'),
-        'admin_email' => (string) get_option('admin_email'),
-    ],
 ];
 
-// Registration.
+$wpda_options = [];
+$wpda_each(function (int $blog) use (&$wpda_options, $wpda_tag) {
+    foreach (['siteurl', 'home', 'admin_email'] as $name) {
+        $wpda_options[$wpda_tag($blog, $name)] = (string) get_option($name);
+    }
+});
+$wpda['options'] = (object) $wpda_options;
+
+// Registration: the main site's default role; on a multisite, the network
+// setting decides whether anyone can sign up.
 $wpda_default_role = (string) get_option('default_role');
 $wpda_role = get_role($wpda_default_role);
 $wpda['registration'] = [
-    'users_can_register' => (bool) get_option('users_can_register'),
+    'users_can_register' => is_multisite() ? in_array(get_site_option('registration'), ['user', 'all'], true) : (bool) get_option('users_can_register'),
     'default_role' => $wpda_default_role,
     'default_role_caps' => $wpda_role ? array_keys(array_filter($wpda_role->capabilities)) : [],
 ];
 
-// Users: roles from the capabilities meta directly, so a capability granted
-// outside any role (role injection) shows up as extra_caps.
-$wpda_roles = wp_roles();
+// Users: roles from each site's capabilities meta directly, so a capability
+// granted outside any role (role injection) shows up as extra_caps.
 $wpda_user_roles = [];
+$wpda_privileged = [];
 $wpda_detail = [];
 $wpda_counts = [];
-$wpda_capkey = $wpdb->get_blog_prefix() . 'capabilities';
-foreach ($wpdb->get_results($wpdb->prepare("SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = %s", $wpda_capkey)) as $row) {
-    $caps = maybe_unserialize($row->meta_value);
-    $roles = [];
-    $extra = [];
-    foreach (is_array($caps) ? $caps : [] as $cap => $on) {
-        if (! $on) {
-            continue;
+$wpda_each(function (int $blog) use ($wpdb, $wpda_tag, $wpda_public, &$wpda_user_roles, &$wpda_privileged, &$wpda_detail, &$wpda_counts) {
+    $site_roles = wp_roles();
+    $public = $wpda_public($blog);
+    $capkey = $wpdb->get_blog_prefix() . 'capabilities';
+    foreach ($wpdb->get_results($wpdb->prepare("SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = %s", $capkey)) as $row) {
+        $caps = maybe_unserialize($row->meta_value);
+        $roles = [];
+        $extra = [];
+        foreach (is_array($caps) ? $caps : [] as $cap => $on) {
+            if (! $on) {
+                continue;
+            }
+            if ($site_roles->is_role($cap)) {
+                $roles[] = (string) $cap;
+            } else {
+                $extra[] = $wpda_tag($blog, (string) $cap);
+            }
         }
-        if ($wpda_roles->is_role($cap)) {
-            $roles[] = (string) $cap;
-        } else {
-            $extra[] = (string) $cap;
+        foreach ($roles ?: ['(none)'] as $r) {
+            $k = $wpda_tag($blog, $r);
+            $wpda_counts[$k] = ($wpda_counts[$k] ?? 0) + 1;
+        }
+        $id = (int) $row->user_id;
+        foreach ($roles as $r) {
+            $wpda_user_roles[$id][] = $wpda_tag($blog, $r);
+        }
+        if (array_diff($roles, $public)) {
+            $wpda_privileged[$id] = true;
+        }
+        if (isset($wpda_privileged[$id]) || $extra) {
+            $wpda_detail[$id] ??= ['extra_caps' => [], 'app_passwords' => []];
+            array_push($wpda_detail[$id]['extra_caps'], ...$extra);
         }
     }
-    foreach ($roles ?: ['(none)'] as $r) {
-        $wpda_counts[$r] = ($wpda_counts[$r] ?? 0) + 1;
-    }
-    $id = (int) $row->user_id;
-    $wpda_user_roles[$id] = $roles;
-    if (array_diff($roles, $wpda_low_roles) || $extra) {
-        $wpda_detail[$id] = ['extra_caps' => $extra, 'app_passwords' => []];
+});
+if (is_multisite()) {
+    foreach (get_super_admins() as $login) {
+        $u = get_user_by('login', $login);
+        if ($u) {
+            $wpda_user_roles[$u->ID][] = 'super_admin';
+            $wpda_privileged[$u->ID] = true;
+            $wpda_detail[$u->ID] ??= ['extra_caps' => [], 'app_passwords' => []];
+        }
     }
 }
 $wpda['role_counts'] = (object) $wpda_counts;
@@ -118,7 +171,7 @@ foreach ($wpda_detail as $id => $d) {
         'email' => (string) $u->user_email,
         'registered' => (string) $u->user_registered,
         'roles' => $roles,
-        'privileged' => (bool) array_diff($roles, $wpda_low_roles),
+        'privileged' => isset($wpda_privileged[$id]),
         'extra_caps' => $d['extra_caps'],
         'sessions' => array_slice($sessions, 0, 20),
         'app_passwords' => $d['app_passwords'],
@@ -127,10 +180,14 @@ foreach ($wpda_detail as $id => $d) {
 
 // WooCommerce REST API keys, without the key or secret.
 $wpda['woo_keys'] = [];
-$wpda_table = $wpdb->prefix . 'woocommerce_api_keys';
-if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpda_table)))) {
-    foreach ($wpdb->get_results("SELECT key_id, user_id, description, permissions, truncated_key, last_access FROM {$wpda_table}") as $k) {
+$wpda_each(function (int $blog) use ($wpdb, &$wpda) {
+    $table = $wpdb->prefix . 'woocommerce_api_keys';
+    if (! $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)))) {
+        return;
+    }
+    foreach ($wpdb->get_results("SELECT key_id, user_id, description, permissions, truncated_key, last_access FROM {$table}") as $k) {
         $wpda['woo_keys'][] = [
+            'blog' => $blog,
             'key_id' => (int) $k->key_id,
             'user_id' => (int) $k->user_id,
             'description' => (string) $k->description,
@@ -139,14 +196,15 @@ if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpda_t
             'last_access' => (string) $k->last_access,
         ];
     }
-}
+});
 
 // Content. SQL prefilters with LIKE (one scan per table), PHP decodes and
 // matches. A match is reported as kind + value: the script's host, the
 // iframe's host, or the normalised inline code, so one accepted value (a GTM
 // snippet, a YouTube iframe) is accepted wherever it appears.
-$wpda_self = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
-$wpda_host = function (string $url) use ($wpda_self): string {
+$wpda_self = '';     // the current site's host, reported as "self"
+$wpda_cur_blog = 0;
+$wpda_host = function (string $url) use (&$wpda_self): string {
     $url = trim(html_entity_decode($url, ENT_QUOTES | ENT_HTML5));
     if (str_starts_with($url, '//')) {
         $url = 'https:' . $url;
@@ -220,7 +278,7 @@ $wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_sca
 // One entry per distinct kind + value: how often, and the first places.
 $wpda_hits = [];
 $wpda['content_truncated'] = false;
-$wpda_record = function (string $table, int $id, string $field, string $key, ?string $text) use (&$wpda, &$wpda_hits, $wpda_scan, $wpda_max) {
+$wpda_record = function (string $table, int $id, string $field, string $key, ?string $text) use (&$wpda, &$wpda_hits, &$wpda_cur_blog, $wpda_scan, $wpda_max) {
     if ($text === null || $text === '') {
         return;
     }
@@ -236,7 +294,7 @@ $wpda_record = function (string $table, int $id, string $field, string $key, ?st
         }
         $wpda_hits[$hash]['count']++;
         if (count($wpda_hits[$hash]['at']) < 5) {
-            $wpda_hits[$hash]['at'][] = ['table' => $table, 'id' => $id, 'field' => $field, 'key' => $key];
+            $wpda_hits[$hash]['at'][] = ['blog' => $wpda_cur_blog, 'table' => $table, 'id' => $id, 'field' => $field, 'key' => $key];
         }
     }
 };
@@ -263,28 +321,32 @@ $wpda_query = function (string $sql) use ($wpdb, &$wpda, $wpda_rows, &$wpda_erro
     return $rows;
 };
 
-foreach ($wpda_query("SELECT ID, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND " . $wpda_like(['post_title', 'post_content', 'post_excerpt'])) as $r) {
-    $wpda_record('posts', (int) $r->ID, 'post_title', '', $r->post_title);
-    $wpda_record('posts', (int) $r->ID, 'post_content', '', $r->post_content);
-    $wpda_record('posts', (int) $r->ID, 'post_excerpt', '', $r->post_excerpt);
-}
-// _oembed_* is WordPress's cache of embed HTML for URLs already in content.
-foreach ($wpda_query("SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_oembed\\_%' AND " . $wpda_like(['meta_value'])) as $r) {
-    $wpda_record('postmeta', (int) $r->post_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
-}
-foreach ($wpda_query("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' AND " . $wpda_like(['option_value'])) as $r) {
-    $wpda_record('options', 0, 'option_value', (string) $r->option_name, $r->option_value);
-}
-foreach ($wpda_query("SELECT t.term_id, t.name, tt.description FROM {$wpdb->terms} t JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id WHERE " . $wpda_like(['t.name', 'tt.description'])) as $r) {
-    $wpda_record('terms', (int) $r->term_id, 'name', '', $r->name);
-    $wpda_record('terms', (int) $r->term_id, 'description', '', $r->description);
-}
-foreach ($wpda_query("SELECT term_id, meta_key, meta_value FROM {$wpdb->termmeta} WHERE " . $wpda_like(['meta_value'])) as $r) {
-    $wpda_record('termmeta', (int) $r->term_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
-}
-foreach ($wpda_query("SELECT comment_ID, comment_content FROM {$wpdb->comments} WHERE comment_approved = '1' AND " . $wpda_like(['comment_content'])) as $r) {
-    $wpda_record('comments', (int) $r->comment_ID, 'comment_content', '', $r->comment_content);
-}
+$wpda_each(function (int $blog) use ($wpdb, $wpda_query, $wpda_like, $wpda_record, &$wpda_self, &$wpda_cur_blog) {
+    $wpda_cur_blog = $blog;
+    $wpda_self = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
+    foreach ($wpda_query("SELECT ID, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND " . $wpda_like(['post_title', 'post_content', 'post_excerpt'])) as $r) {
+        $wpda_record('posts', (int) $r->ID, 'post_title', '', $r->post_title);
+        $wpda_record('posts', (int) $r->ID, 'post_content', '', $r->post_content);
+        $wpda_record('posts', (int) $r->ID, 'post_excerpt', '', $r->post_excerpt);
+    }
+    // _oembed_* is WordPress's cache of embed HTML for URLs already in content.
+    foreach ($wpda_query("SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_oembed\\_%' AND " . $wpda_like(['meta_value'])) as $r) {
+        $wpda_record('postmeta', (int) $r->post_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
+    }
+    foreach ($wpda_query("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' AND " . $wpda_like(['option_value'])) as $r) {
+        $wpda_record('options', 0, 'option_value', (string) $r->option_name, $r->option_value);
+    }
+    foreach ($wpda_query("SELECT t.term_id, t.name, tt.description FROM {$wpdb->terms} t JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id WHERE " . $wpda_like(['t.name', 'tt.description'])) as $r) {
+        $wpda_record('terms', (int) $r->term_id, 'name', '', $r->name);
+        $wpda_record('terms', (int) $r->term_id, 'description', '', $r->description);
+    }
+    foreach ($wpda_query("SELECT term_id, meta_key, meta_value FROM {$wpdb->termmeta} WHERE " . $wpda_like(['meta_value'])) as $r) {
+        $wpda_record('termmeta', (int) $r->term_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
+    }
+    foreach ($wpda_query("SELECT comment_ID, comment_content FROM {$wpdb->comments} WHERE comment_approved = '1' AND " . $wpda_like(['comment_content'])) as $r) {
+        $wpda_record('comments', (int) $r->comment_ID, 'comment_content', '', $r->comment_content);
+    }
+});
 $wpda['content'] = array_values($wpda_hits);
 
 // Files: executable files under uploads, and what sits in the plugin,
