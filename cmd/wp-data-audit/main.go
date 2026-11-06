@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -91,6 +94,7 @@ func flags(name string) (*flag.FlagSet, func() runner.Target) {
 func auditSite(args []string) error {
 	fs, target := flags("wp-data-audit")
 	wp := fs.String("wp", "", "wp-cli command instead of vendor/bin/wp @<env>")
+	shell := fs.String("sh", "", "command running a shell script from stdin on the site, instead of ssh to the alias's host (e.g. \"ddev exec sh -s\")")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -108,12 +112,28 @@ func auditSite(args []string) error {
 		base = strings.Fields(*wp)
 	}
 	out, err := runWP(t.Repo, append(slices.Clone(base), audit.WPArgs...), r.Script)
-	if err != nil {
-		return err
+	if err != nil { // the hasher needs no wp-cli: the files are still checked
+		fmt.Fprintln(os.Stderr, "wp-data-audit: collector:", err)
+		r.Note("the collector failed (" + err.Error() + "); the site's wp-cli may run the wrong PHP: set php_path for the alias in wp-cli.yml")
+		out = nil
 	}
-	hashed, err := runWP(t.Repo, append(slices.Clone(base), audit.HasherArgs...), r.Hasher)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err) // a note in the report; the rest still counts
+	// The hasher runs the server's own sh, find and sha256sum, never the
+	// site's wp-cli: over ssh to the alias's host unless told otherwise.
+	sh := strings.Fields(*shell)
+	if len(sh) == 0 && *wp == "" {
+		if sh, err = aliasSSH(t.Repo, t.Env); err != nil {
+			fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err)
+		}
+	}
+	var hashed []byte
+	if len(sh) > 0 {
+		if hashed, err = runWP(t.Repo, sh, r.Hasher); err != nil {
+			fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err) // a note in the report; the rest still counts
+			r.Note("the hasher failed: " + err.Error())
+		}
+	}
+	if out == nil && hashed == nil {
+		return errors.New("neither the collector nor the hasher ran")
 	}
 	report, err := r.Finish(out, hashed)
 	if err != nil {
@@ -135,6 +155,41 @@ func auditSite(args []string) error {
 		return exitCode(1)
 	}
 	return nil
+}
+
+var sshRE = regexp.MustCompile(`^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9.-]+)(?::(\d+))?(/[A-Za-z0-9._/-]*)?$`)
+
+// aliasSSH is the ssh command for wp-cli.yml's @env alias
+// (`ssh: user@host:port/path`), running `sh -s` in its path.
+func aliasSSH(repo, env string) ([]string, error) {
+	b, err := os.ReadFile(filepath.Join(repo, "wp-cli.yml"))
+	if err != nil {
+		return nil, err
+	}
+	in := false
+	for _, line := range strings.Split(string(b), "\n") {
+		key := strings.Trim(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ":")), `'"`)
+		if line != "" && line[0] != ' ' && line[0] != '\t' {
+			in = key == "@"+env
+			continue
+		}
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ssh:"); in && ok {
+			m := sshRE.FindStringSubmatch(strings.Trim(strings.TrimSpace(v), `'"`))
+			if m == nil {
+				return nil, fmt.Errorf("wp-cli.yml @%s ssh %q: not user@host:port/path", env, strings.TrimSpace(v))
+			}
+			argv := []string{"ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=20"}
+			if m[3] != "" {
+				argv = append(argv, "-p", m[3])
+			}
+			host := m[2]
+			if m[1] != "" {
+				host = m[1] + "@" + host
+			}
+			return append(argv, host, "cd '"+cmp.Or(m[4], ".")+"' && "+audit.HasherCommand), nil
+		}
+	}
+	return nil, fmt.Errorf("wp-cli.yml has no ssh for @%s", env)
 }
 
 // runWP pipes script to argv in dir and returns its stdout.

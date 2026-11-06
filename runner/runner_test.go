@@ -3,6 +3,7 @@ package runner
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	audit "github.com/generoi/wp-data-audit"
@@ -61,6 +62,30 @@ func TestFinishAcceptFinish(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(StateDir(site), "report.json")); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("report.json mode: %v %v", fi, err)
+	}
+}
+
+// Without the collector (the site's wp-cli failed), the hasher's files are
+// still judged, and no snapshot replaces the last full one.
+func TestFinishWithoutCollector(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	site := Target{Site: "alpha", Env: "production", Repo: t.TempDir()}
+	r, err := Prepare(site)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashed := "\nWPDA-BEGIN\nVERSION 1\nCONTENT web/app\nFILES\n" + strings.Repeat("a", 64) + "  web/app/uploads/x.php\nSILENCE\nWPDA-END\n"
+	r.Note("the collector failed")
+	rep, err := r.Finish(nil, []byte(hashed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Flags) != 1 || rep.Flags[0].Kind != "file" || !strings.Contains(strings.Join(rep.Notes, "\n"), "the collector failed") {
+		t.Fatalf("report %+v", rep)
+	}
+	if snaps, _ := filepath.Glob(filepath.Join(StateDir(site), "snapshots", "*.json")); len(snaps) != 0 {
+		t.Fatalf("a partial run saved a snapshot: %v", snaps)
 	}
 }
 

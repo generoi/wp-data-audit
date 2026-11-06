@@ -1,16 +1,24 @@
 # wp-data-audit
 
 A light, read-only security audit of a WordPress site's data, meant to run
-during monthly maintenance. Two PHP scripts are piped to `wp eval-file -` on
-the site (nothing is installed or written there): a collector that reads the
-database with plugins and themes unloaded, and a hasher that lists the
-release's PHP files with `--skip-wordpress`, so no code on the site can change
-what it reports. Go compares their facts with a composer install of the
-deployed commit, the previous run and the flags a person has accepted. No
-model is involved: a clean site costs nothing to check.
+during monthly maintenance. Two scripts are piped over SSH (nothing is
+installed or written on the site): a PHP collector through the site's own
+`vendor/bin/wp eval-file -`, reading the database with plugins and themes
+unloaded, and a shell hasher (`hasher.sh`) that lists the release's PHP files
+with the server's own `find` and `sha256sum` in an empty environment, so no
+code from the release runs for it. Go compares their facts with a composer
+install of the deployed commit, the previous run and the flags a person has
+accepted. No model is involved: a clean site costs nothing to check.
+
+What it can't see past: the collector loads core, mu-plugins, drop-ins and
+the site's wp-cli, so the report says when any of those differ from the
+release (its other findings could then be forged); and the site user's shell
+startup files run before the hasher, so an attacker who has that user's home
+and targets this tool specifically could still interfere.
 
 It flags:
 
+- a role anyone can get whose definition grants more than reading
 - accounts with a role the public can't get: new ones or changed roles
   urgently, email domains outside the staff and client domains. Only
   `customer` on WooCommerce sites and the roles a repo's `data-audit.json` declares are public,
@@ -26,8 +34,8 @@ It flags:
 - every PHP file of the release (core, `vendor/`, plugins including premium
   ones, mu-plugins, themes, drop-ins) that differs from a composer install of
   the deployed commit, one flag per package or theme. The deployed commit is
-  Deployer's `REVISION` file, else GitHub's last successful
-  `deploy_production.yml` run; a checkout a few commits ahead still counts
+  GitHub's last successful `deploy_production.yml` run, else Deployer's
+  `REVISION` file; a checkout a few commits ahead still counts
   when nothing deployed changed in between. Without a local install it falls
   back to wordpress.org's checksums for core and wp.org plugins. Compiled
   caches, built `build/` files and WordPress's own translation updates can't
@@ -51,7 +59,7 @@ install` (for the file comparison; `gh` finds the deployed commit):
 wp-data-audit geoip-update        # once a month
 wp-data-audit                     # audits @production; exit 1 when there are flags
 wp-data-audit accept <id>...      # an expected flag stays quiet until what it describes changes
-wp-data-audit --env local --wp "ddev wp"   # try it on the local copy
+wp-data-audit --env local --wp "ddev wp" --sh "ddev exec sh -s"   # try it on the local copy
 ```
 
 The first run lists everything there is (all admins, every embed): accept the
@@ -85,8 +93,8 @@ emails and login IPs).
 ## As a library
 
 `runner.Prepare` reads the repo and returns the two scripts to pipe however
-you reach the site (`Run.Script` with `audit.WPArgs`, `Run.Hasher` with
-`audit.HasherArgs`); `Run.Finish` judges both outputs and saves snapshot and
+you reach the site (`Run.Script` to wp-cli with `audit.WPArgs`, `Run.Hasher`
+to `audit.HasherCommand` after a `cd` into the release); `Run.Finish` judges both outputs and saves snapshot and
 report in the same state the CLI uses, and `runner.Accept` records a
 decision. Set `Target.Deployed` (`runner.DeployedCommit`) when the server has
 no `REVISION` file. Underneath,

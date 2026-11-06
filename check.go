@@ -111,6 +111,11 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 	if exp != nil {
 		clients = exp.ClientDomains
 	}
+	if cur.NoCollector {
+		c.note("the collector didn't run, so accounts, options and content weren't checked: only PHP files")
+		c.files(cur, exp)
+		return c.sorted()
+	}
 	c.registration(cur)
 	c.users(prev, cur, clients, geo)
 	c.wooKeys(prev, cur)
@@ -122,6 +127,11 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 	for _, e := range cur.Errors {
 		c.note("collector: " + e)
 	}
+	return c.sorted()
+}
+
+// sorted is the report, urgent flags first.
+func (c *checker) sorted() Report {
 	sort.SliceStable(c.r.Flags, func(i, j int) bool {
 		a, b := c.r.Flags[i], c.r.Flags[j]
 		if a.Severity != b.Severity {
@@ -180,12 +190,29 @@ func sev(urgent bool) string {
 	return Review
 }
 
+// readOnly reports whether caps grant no more than reading.
+func readOnly(caps []string) bool {
+	return !slices.ContainsFunc(caps, func(cap string) bool { return cap != "read" && cap != "level_0" })
+}
+
 func (c *checker) registration(cur *Snapshot) {
+	// A public role's users are only counted: if its definition grants more
+	// than reading, they're privileged without being listed.
+	for _, role := range slices.Sorted(maps.Keys(cur.PublicRoleCaps)) {
+		caps := slices.Sorted(slices.Values(cur.PublicRoleCaps[role]))
+		if !readOnly(caps) {
+			c.flag(Flag{
+				ID: "public-role:" + idPart(role) + ":" + short(caps...), Severity: Urgent, Kind: "role",
+				Message:   "a role anyone can get can do more than read; its users aren't listed",
+				Untrusted: role + ": " + strings.Join(caps, ", "),
+			})
+		}
+	}
 	reg := cur.Registration
 	if !reg.Open {
 		return
 	}
-	harmless := !slices.ContainsFunc(reg.RoleCaps, func(cap string) bool { return cap != "read" && cap != "level_0" })
+	harmless := readOnly(reg.RoleCaps)
 	msg := "anyone can register"
 	if !harmless {
 		msg += ", and new users get a role that can do more than read"
@@ -329,25 +356,26 @@ func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
 	for _, e := range rel.Errors {
 		c.note("hasher: " + e)
 	}
-	if rel.Truncated {
-		c.note("the hasher stopped at its file limit: not every PHP file was checked")
-	}
 	content := rel.Content
 	uploads := content + "/uploads/"
 	paths := slices.Sorted(maps.Keys(rel.Files))
 	units := map[string]bool{} // undeployed plugins etc., flagged once as a whole
+	// A checkout at another commit than production says nothing about what
+	// production deploys: only uploads are judged then.
+	stale := exp != nil && rel.Revision != "" && exp.Revision != "" &&
+		!strings.HasPrefix(exp.Revision, rel.Revision) && !strings.HasPrefix(rel.Revision, exp.Revision)
 	for _, p := range paths {
 		v := rel.Files[p]
 		if rest, ok := strings.CutPrefix(p, uploads); ok {
-			if !strings.HasSuffix(v, ":silence") {
+			if !rel.Silence[p] {
 				c.flag(Flag{
-					ID: "upload-php:" + idPart(rest) + ":" + idPart(fileHash(v)), Severity: Urgent, Kind: "file",
-					Message: "executable file under uploads", Untrusted: rest + " (" + v + ")",
+					ID: "upload-php:" + idPart(rest) + ":" + firstN(v, 16), Severity: Urgent, Kind: "file",
+					Message: "executable file under uploads", Untrusted: rest + " (sha256 " + v + ")",
 				})
 			}
 			continue
 		}
-		if exp == nil {
+		if exp == nil || stale {
 			continue
 		}
 		kind, name := placed(p, content)
@@ -368,8 +396,8 @@ func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
 	case exp.Local == nil:
 		c.note("PHP files not compared with the deployed commit: " + exp.LocalWhy)
 		return false
-	case rel.Revision != "" && exp.Revision != "" && !strings.HasPrefix(exp.Revision, rel.Revision) && !strings.HasPrefix(rel.Revision, exp.Revision):
-		c.note(fmt.Sprintf("PHP files not compared: production runs %s, the checkout is at %.12s", firstN(rel.Revision, 12), exp.Revision))
+	case stale:
+		c.note(fmt.Sprintf("plugins and PHP files not compared: production runs %s, the checkout is at %.12s", firstN(rel.Revision, 12), exp.Revision))
 		return false
 	case rel.Revision == "":
 		c.note("the deployed commit is unknown (no REVISION file, no deploy run found): PHP files compared with the checkout as it is")
@@ -391,7 +419,7 @@ func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
 		u := unit(p, content)
 		lv, ok := exp.Local[p]
 		switch {
-		case ok && fileHash(lv) == fileHash(rel.Files[p]):
+		case ok && lv == rel.Files[p]:
 			continue
 		case u == content+"/languages":
 			skipped["translation files WordPress updates itself (languages)"]++
@@ -399,8 +427,8 @@ func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
 		case !ok && (u == content+"/cache" || strings.Contains(p, "/storage/framework/")):
 			skipped["caches the site compiles itself (cache/, Acorn's storage/framework/)"]++
 			continue
-		case !ok && strings.Contains(p, "/build/"):
-			skipped["built files the checkout hasn't built (build/)"]++
+		case !ok && (strings.Contains(p, "/build/") || strings.Contains(p, "/dist/") && strings.HasSuffix(p, ".asset.php")):
+			skipped["built files the checkout hasn't built (build/, dist/*.asset.php)"]++
 			continue
 		}
 		d := diffs[u]
@@ -418,7 +446,7 @@ func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
 		d := diffs[u]
 		var sig []string
 		for _, p := range append(slices.Clone(d.changed), d.extra...) {
-			sig = append(sig, p+"="+fileHash(rel.Files[p]))
+			sig = append(sig, p+"="+rel.Files[p])
 		}
 		slices.Sort(sig)
 		all := append(slices.Clone(d.changed), d.extra...)
@@ -434,13 +462,35 @@ func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
 	for what, n := range skipped {
 		c.note(fmt.Sprintf("%d PHP file(s) not compared: %s", n, what))
 	}
+	// The collector runs core, mu-plugins, drop-ins and the site's wp-cli; the
+	// hasher doesn't. When those differ, the collector's answers are suspect.
+	var ran []string
+	for u := range diffs {
+		if loadsWithCollector(u, content) {
+			ran = append(ran, u)
+		}
+	}
+	for k := range units {
+		if strings.HasPrefix(k, "mu-plugin") || strings.HasPrefix(k, "dropin") {
+			ran = append(ran, k)
+		}
+	}
+	if len(ran) > 0 {
+		slices.Sort(ran)
+		c.note("code the collector loads differs from the release (" + strings.Join(ran, ", ") + "): its users, options and content findings could be forged; trust the file flags, not those")
+	}
 	return true
 }
 
-// fileHash is the hash part of a hasher value.
-func fileHash(v string) string {
-	h, _, _ := strings.Cut(v, ":")
-	return h
+// loadsWithCollector reports whether unit u runs when the collector does:
+// core, mu-plugins, drop-ins and the site's own wp-cli.
+func loadsWithCollector(u, content string) bool {
+	switch {
+	case u == "core", u == content+"/mu-plugins", strings.HasPrefix(u, content+"/mu-plugins/"), strings.HasPrefix(u, "vendor/wp-cli/"):
+		return true
+	}
+	rest, ok := strings.CutPrefix(u, content+"/")
+	return ok && !strings.Contains(rest, "/") && strings.HasSuffix(rest, ".php")
 }
 
 // placed says what p is under content: a plugin, mu-plugin or drop-in and

@@ -41,18 +41,17 @@ func LoadConfig() (Config, error) {
 }
 
 // Target is one site environment. State is kept per Site and Env; Repo is
-// its checkout at the deployed commit. Deployed is that commit when the
-// caller knows it (GitHub's last successful deploy run, say) and the server
-// has no Deployer REVISION file: files are only compared when the checkout
-// is at it.
+// its checkout at the deployed commit. Deployed is that commit from outside
+// the server (GitHub's last successful deploy run); it wins over a Deployer
+// REVISION file there. Files are only compared when the checkout matches it.
 type Target struct {
 	Site, Env, Repo string
 	Deployed        string
 }
 
-// Run is one audit between Prepare and Finish: pipe Script to wp-cli with
-// audit.WPArgs and Hasher with audit.HasherArgs, then Finish with both
-// outputs.
+// Run is one audit between Prepare and Finish: pipe Script to the site's
+// wp-cli with audit.WPArgs and Hasher to `sh -s` over SSH in the release,
+// then Finish with both outputs.
 type Run struct {
 	Target
 	Script, Hasher string
@@ -80,16 +79,25 @@ func Prepare(t Target) (*Run, error) {
 	return r, nil
 }
 
+// Note adds a line to the report, such as why a script didn't run.
+func (r *Run) Note(s string) { r.notes = append(r.notes, s) }
+
 // Finish judges the collector's and hasher's output against the last
 // snapshot, saves the new snapshot and the report, and returns the report.
-// A hasher that failed is a note, not a failed audit.
+// Either may be nil when it didn't run (say why with Note): without the
+// collector only files are judged and the last snapshot stays the baseline.
 func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
-	snap, err := audit.Parse(out)
-	if err != nil {
-		return audit.Report{}, err
+	snap := &audit.Snapshot{Version: 1, GeneratedAt: time.Now().UTC(), NoCollector: true}
+	if out != nil {
+		var err error
+		if snap, err = audit.Parse(out); err != nil {
+			return audit.Report{}, err
+		}
 	}
-	if rel, err := audit.ParseRelease(hashed); err == nil {
-		if rel.Revision == "" {
+	if hashed == nil {
+		// didn't run: the caller noted why
+	} else if rel, err := audit.ParseRelease(hashed); err == nil {
+		if r.Deployed != "" { // GitHub's word over a file on the server an attacker could edit
 			rel.Revision = r.Deployed
 		}
 		snap.Release = rel
@@ -146,9 +154,11 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 	}, r.repo, g)
 	report.Notes = append(slices.Clone(r.notes), report.Notes...)
 
-	stamp := snap.GeneratedAt.UTC().Format("20060102T150405Z")
-	if err := writeJSON(filepath.Join(dir, "snapshots", stamp+".json"), snap); err != nil {
-		return audit.Report{}, err
+	if !snap.NoCollector { // a partial run would make every account look new next time
+		stamp := snap.GeneratedAt.UTC().Format("20060102T150405Z")
+		if err := writeJSON(filepath.Join(dir, "snapshots", stamp+".json"), snap); err != nil {
+			return audit.Report{}, err
+		}
 	}
 	if err := writeJSON(filepath.Join(dir, "report.json"), report); err != nil {
 		return audit.Report{}, err

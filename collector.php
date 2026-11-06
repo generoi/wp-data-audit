@@ -82,9 +82,16 @@ $wpda_user_roles = [];
 $wpda_privileged = [];
 $wpda_detail = [];
 $wpda_counts = [];
-$wpda_each(function (int $blog) use ($wpdb, $wpda_tag, $wpda_public, &$wpda_user_roles, &$wpda_privileged, &$wpda_detail, &$wpda_counts) {
+$wpda_public_caps = [];
+$wpda_each(function (int $blog) use ($wpdb, $wpda_tag, $wpda_public, &$wpda_user_roles, &$wpda_privileged, &$wpda_detail, &$wpda_counts, &$wpda_public_caps) {
     $site_roles = wp_roles();
     $public = $wpda_public($blog);
+    // Role definitions are data too: a public role that grants more than
+    // reading makes all its users privileged without listing them.
+    foreach ($public as $r) {
+        $role = $site_roles->get_role($r);
+        $wpda_public_caps[$wpda_tag($blog, $r)] = $role ? array_keys(array_filter($role->capabilities)) : [];
+    }
     $capkey = $wpdb->get_blog_prefix() . 'capabilities';
     foreach ($wpdb->get_results($wpdb->prepare("SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = %s", $capkey)) as $row) {
         $caps = maybe_unserialize($row->meta_value);
@@ -128,6 +135,7 @@ if (is_multisite()) {
     }
 }
 $wpda['role_counts'] = (object) $wpda_counts;
+$wpda['public_role_caps'] = (object) $wpda_public_caps;
 
 foreach ($wpdb->get_results("SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = '_application_passwords'") as $row) {
     $list = maybe_unserialize($row->meta_value);

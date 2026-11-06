@@ -107,9 +107,9 @@ func TestUrgentSignals(t *testing.T) {
 	cur.Options["siteurl"] = "https://evil.example"
 	cur.Users = append(cur.Users, User{ID: 9, Login: "c", Roles: []string{"customer"}, ExtraCaps: []string{"manage_options"}})
 	cur.Registration = Registration{Open: true, Role: "editor", RoleCaps: []string{"read", "edit_posts"}}
-	cur.Release = &Release{Version: 1, Content: "web/app", Files: map[string]string{
-		"web/app/uploads/2024/01/x.php":                     "abcdef0123456789:120",
-		"web/app/uploads/index.php":                         "e3b0c44298fc1c14:0:silence",
+	cur.Release = &Release{Version: 1, Content: "web/app", Silence: map[string]bool{"web/app/uploads/index.php": true}, Files: map[string]string{
+		"web/app/uploads/2024/01/x.php":                     "abcdef0123456789aaaa",
+		"web/app/uploads/index.php":                         "e3b0c44298fc1c14",
 		"web/app/plugins/akismet/akismet.php":               "1111:10",
 		"web/app/plugins/evil/evil.php":                     "2222:10",
 		"web/app/mu-plugins/kinsta-mu-plugins.php":          "3333:10",
@@ -175,6 +175,22 @@ func TestSiteTextStaysOutOfIDs(t *testing.T) {
 	}
 }
 
+// A public role redefined to grant more than reading is urgent: its users
+// would be privileged without being listed.
+func TestPublicRoleThatCanDoMore(t *testing.T) {
+	cur := base0()
+	cur.PublicRoleCaps = map[string][]string{"customer": {"read"}, "3:subscriber": {"read", "manage_options"}}
+	got := ids(Check(nil, cur, Site{}, nil, nil))
+	if got["public-role:3:subscriber:"+short("manage_options", "read")] != Urgent {
+		t.Fatalf("flags %v", got)
+	}
+	for id := range got {
+		if strings.HasPrefix(id, "public-role:customer") {
+			t.Fatalf("read-only role flagged: %s", id)
+		}
+	}
+}
+
 // A changed option stays flagged on later runs until it's accepted.
 func TestOptionChangeStaysUntilAccepted(t *testing.T) {
 	cur := base0()
@@ -223,6 +239,7 @@ func TestReleaseComparedWithDeployedCommit(t *testing.T) {
 	server["web/app/plugins/premium/inc/x.php"] = "0bad:1"       // modified
 	server["web/app/plugins/premium/inc/shell.php"] = "0bad:2"   // added
 	server["web/app/themes/theme/build/index.asset.php"] = "9:1" // built in CI
+	server["web/app/themes/theme/dist/scripts/main.asset.php"] = "9:2"
 	server["web/app/languages/fi.l10n.php"] = "1234:1"           // updated by WordPress
 	server["web/app/mu-plugins/kinsta-mu-plugins/x.php"] = "5:1"
 	cur := base0()
@@ -241,14 +258,22 @@ func TestReleaseComparedWithDeployedCommit(t *testing.T) {
 		t.Fatalf("release flags %+v", rel)
 	}
 	notes := strings.Join(r.Notes, "\n")
-	if !strings.Contains(notes, "languages") || !strings.Contains(notes, "build/") {
+	if !strings.Contains(notes, "languages") || !strings.Contains(notes, "build/") || strings.Contains(notes, "could be forged") {
 		t.Fatalf("notes %s", notes)
 	}
-	// Production on another commit: nothing compared.
+	// Changed core: the collector, which loads it, can't be trusted.
+	cur.Release.Files["web/wp/wp-includes/load.php"] = "0bad:9"
+	if notes := strings.Join(Check(nil, cur, Site{}, repo, nil).Notes, "\n"); !strings.Contains(notes, "could be forged") {
+		t.Fatalf("notes %s", notes)
+	}
+	cur.Release.Files["web/wp/wp-includes/load.php"] = "bbbb:1"
+	// Production on another commit: nothing compared, not even which plugins
+	// the checkout deploys (production's commit may add one).
 	repo.Revision = "fff999"
+	cur.Release.Files["web/app/plugins/newer/newer.php"] = "7:1"
 	r = Check(nil, cur, Site{}, repo, nil)
 	for _, f := range r.Flags {
-		if f.Kind == "release" {
+		if f.Kind == "release" || f.ID == "plugin:newer" {
 			t.Fatalf("compared across commits: %v", f)
 		}
 	}
@@ -333,9 +358,9 @@ func TestReadRepo(t *testing.T) {
 	if got := exp.PublicRoles["members.example"]; len(got) != 1 || got[0] != "subscriber" || len(exp.ClientDomains) != 1 {
 		t.Errorf("data-audit settings: %v %v", exp.PublicRoles, exp.ClientDomains)
 	}
-	// Hashed like hasher.php: sha256's first 16 hex and the size.
+	// Hashed like hasher.sh's sha256sum.
 	sum := sha256.Sum256([]byte("<?php // a"))
-	if got := exp.Local["vendor/acme/lib/A.php"]; got != hex.EncodeToString(sum[:8])+":10" {
+	if got := exp.Local["vendor/acme/lib/A.php"]; got != hex.EncodeToString(sum[:]) {
 		t.Errorf("local hash %q", got)
 	}
 	for p := range exp.Local {
@@ -345,6 +370,30 @@ func TestReadRepo(t *testing.T) {
 	}
 	if len(exp.Revision) != 40 {
 		t.Errorf("revision %q", exp.Revision)
+	}
+}
+
+// The hasher's output: sha256sum lines per section, an escaped odd name, and
+// a name that tries to forge a section or a silence line.
+func TestParseRelease(t *testing.T) {
+	h := strings.Repeat("a", 64)
+	out := "motd noise\n\nWPDA-BEGIN\nVERSION 1\nCONTENT web/app\nFILES\n" +
+		h + "  web/app/plugins/p/p.php\n" +
+		`\` + h + `  web/app/uploads/x\nSILENCE\n` + h + `  web/app/uploads/shell.php` + "\n" + // one file, newline in its name
+		h + "  web/app/uploads//y.php\n" +
+		"SILENCE\n" + h + "  web/app/uploads/index.php\nWPDA-END\n"
+	r, err := ParseRelease([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Content != "web/app" || len(r.Files) != 3 || r.Files["web/app/uploads/y.php"] != h || !r.Silence["web/app/uploads/index.php"] {
+		t.Fatalf("release %+v", r)
+	}
+	if r.Silence["web/app/uploads/shell.php"] || r.Files["web/app/uploads/x\nSILENCE\n"+h+"  web/app/uploads/shell.php"] != h {
+		t.Fatalf("a file name forged a line: %+v", r)
+	}
+	if _, err := ParseRelease([]byte("\nWPDA-BEGIN\nVERSION 1\nFILES\n")); err == nil {
+		t.Fatal("parsed output that was cut short")
 	}
 }
 

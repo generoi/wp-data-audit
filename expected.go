@@ -158,10 +158,10 @@ func SameFiles(dir, rev string) bool {
 	return cmd.Run() == nil // exit 1: changes; other errors (rev not fetched): unknown
 }
 
-// phpFile is what the hasher hashes: the same rule on both sides.
+// phpFile is what the hasher hashes: the same rule as hasher.sh's find.
 var phpFile = regexp.MustCompile(`(?i)\.(php\d?|phtml|phar|pht|phps|inc)$`)
 
-// hashTree hashes a composer install's PHP files the way hasher.php does on
+// hashTree hashes a composer install's PHP files the way hasher.sh does on
 // the server: core, vendor and the content dir, not uploads or Composer's
 // generated autoloaders, symlinked folders not followed.
 func hashTree(dir string) (map[string]string, error) {
@@ -187,7 +187,7 @@ func hashTree(dir string) (map[string]string, error) {
 				return err
 			}
 			sum := sha256.Sum256(b)
-			files[rel] = fmt.Sprintf("%x:%d", sum[:8], len(b))
+			files[rel] = fmt.Sprintf("%x", sum)
 			return nil
 		})
 		if err != nil {

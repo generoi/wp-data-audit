@@ -14,6 +14,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,19 +22,23 @@ import (
 //go:embed collector.php
 var collector string
 
-// Hasher is the PHP to pipe to `wp eval-file - --skip-wordpress` on the
-// site: the release's PHP files and their hashes, read without loading any
-// site code (ParseRelease reads its output).
+// Hasher is the shell script to pipe to `sh -s` over SSH in the release:
+// its PHP files and their hashes from the system's find and sha256sum, so
+// nothing in the release runs (ParseRelease reads its output).
 //
-//go:embed hasher.php
+//go:embed hasher.sh
 var Hasher string
+
+// HasherCommand is the remote command to pipe Hasher to, after a `cd` into
+// the release: an empty environment and the system's PATH, so a tool the
+// site user put in ~/bin or exported doesn't stand in for find or sha256sum.
+// (Their shell startup files still run before it over SSH: a determined
+// attacker with the site user's home can still interfere.)
+const HasherCommand = "exec /usr/bin/env -i PATH=/usr/bin:/bin /bin/sh -s"
 
 // WPArgs are the wp-cli flags to run Script with: plugins and themes stay
 // unloaded, so they can't interfere with what it reports.
 var WPArgs = []string{"eval-file", "-", "--skip-plugins", "--skip-themes"}
-
-// HasherArgs are the wp-cli flags to run Hasher with.
-var HasherArgs = []string{"eval-file", "-", "--skip-wordpress"}
 
 var (
 	roleRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
@@ -79,13 +84,70 @@ func Parse(out []byte) (*Snapshot, error) {
 	return &snap, nil
 }
 
-// ParseRelease reads the hasher's output.
+// ParseRelease reads the hasher's output: keyword lines, then sha256sum's
+// under FILES and SILENCE.
 func ParseRelease(out []byte) (*Release, error) {
-	var r Release
-	if err := block(out, "hasher", &r, &r.Version); err != nil {
-		return nil, err
+	_, rest, ok := strings.Cut(string(out), "\nWPDA-BEGIN\n")
+	if !ok {
+		return nil, errors.New("no WPDA-BEGIN in the hasher's output")
 	}
-	return &r, nil
+	body, _, ok := strings.Cut(rest, "\nWPDA-END")
+	if !ok {
+		return nil, errors.New("no WPDA-END in the hasher's output (cut short?)")
+	}
+	r := &Release{Files: map[string]string{}, Silence: map[string]bool{}}
+	section := ""
+	for _, line := range strings.Split(body, "\n") {
+		key, val, _ := strings.Cut(line, " ")
+		switch key {
+		case "VERSION":
+			r.Version, _ = strconv.Atoi(val)
+			continue
+		case "ERROR":
+			r.Errors = append(r.Errors, val)
+			continue
+		case "REVISION":
+			r.Revision = val
+			continue
+		case "CONTENT":
+			r.Content = val
+			continue
+		case "FILES", "SILENCE":
+			section = key
+			continue
+		case "":
+			continue
+		}
+		sum, path, err := sumLine(line)
+		switch {
+		case err != nil:
+			r.Errors = append(r.Errors, err.Error())
+		case section == "FILES":
+			r.Files[path] = sum
+		case section == "SILENCE":
+			r.Silence[path] = true
+		}
+	}
+	if r.Version != 1 {
+		return nil, fmt.Errorf("hasher output version %d, want 1", r.Version)
+	}
+	return r, nil
+}
+
+var sumRE = regexp.MustCompile(`^\\?([0-9a-f]{64})  (.+)$`)
+
+// sumLine is one sha256sum line. A name with a backslash or newline is
+// escaped, and its line starts with a backslash.
+func sumLine(line string) (sum, path string, err error) {
+	m := sumRE.FindStringSubmatch(line)
+	if m == nil {
+		return "", "", fmt.Errorf("hasher: unexpected line %q", firstN(line, 80))
+	}
+	path = m[2]
+	if strings.HasPrefix(line, `\`) {
+		path = strings.NewReplacer(`\\`, `\`, `\n`, "\n", `\r`, "\r").Replace(path)
+	}
+	return m[1], strings.ReplaceAll(path, "//", "/"), nil
 }
 
 func block(out []byte, what string, v any, version *int) error {
@@ -117,6 +179,7 @@ type Snapshot struct {
 	Options          map[string]string `json:"options"`
 	Registration     Registration      `json:"registration"`
 	RoleCounts       map[string]int    `json:"role_counts"`
+	PublicRoleCaps   map[string][]string `json:"public_role_caps"` // what each public role (blog-tagged) grants
 	Users            []User            `json:"users"`
 	WooKeys          []WooKey          `json:"woo_keys"`
 	Content          []Match           `json:"content"`
@@ -126,18 +189,21 @@ type Snapshot struct {
 	// Release is the hasher's file list, joined in by the caller (runner);
 	// nil when it didn't run.
 	Release *Release `json:"release,omitempty"`
+	// NoCollector: the collector didn't run (the site's wp-cli failed), so
+	// only the hasher's files are judged. Such a snapshot isn't saved.
+	NoCollector bool `json:"-"`
 }
 
 // Release is the hasher's output: every PHP file of the release and under
-// uploads, path (from the root) → "<sha256, 16 hex>:<size>[:silence]".
+// uploads, path (from the root) → sha256; Silence are the uploads files that
+// are empty or a "Silence is golden" guard.
 type Release struct {
-	Version   int               `json:"version"`
-	Root      string            `json:"root"`
-	Revision  string            `json:"revision"` // Deployer's REVISION: the deployed commit
-	Content   string            `json:"content"`  // web/app (Bedrock) or wp-content
-	Files     map[string]string `json:"files"`
-	Truncated bool              `json:"truncated"`
-	Errors    []string          `json:"errors"`
+	Version  int               `json:"version"`
+	Revision string            `json:"revision"` // the deployed commit: REVISION, else the caller's
+	Content  string            `json:"content"`  // web/app (Bedrock) or wp-content
+	Files    map[string]string `json:"files"`
+	Silence  map[string]bool   `json:"silence,omitempty"`
+	Errors   []string          `json:"errors"`
 }
 
 type Registration struct {
