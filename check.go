@@ -55,6 +55,10 @@ type Site struct {
 	AllowedIPs       []string        // IPs or CIDR ranges never flagged, whatever their country
 	StaffDomains     []string        // email domains of the people who run the site
 	Accepted         map[string]bool // flag IDs a person accepted
+	// Pending are the last report's flag IDs. A change caught by comparing
+	// with the previous snapshot (an option's new value) stays flagged until
+	// accepted, instead of only on the run that saw it.
+	Pending map[string]bool
 }
 
 // Repo is what the site's repo says: what it deploys (plugin, mu-plugin and
@@ -76,6 +80,9 @@ type Geo interface {
 
 // Deploys delete these to hide the WordPress version; missing is fine.
 var removedOnPurpose = regexp.MustCompile(`File doesn't exist: (readme\.html|license\.txt|wp-config-sample\.php)$`)
+
+// coreFileLine is a core verify-checksums warning about a file.
+var coreFileLine = regexp.MustCompile(`File (doesn't verify against checksum|should not exist|doesn't exist): `)
 
 // Kinsta installs its own must-use plugin on every site.
 var hostMuPlugins = map[string]bool{"kinsta-mu-plugins": true, "kinsta-mu-plugins.php": true}
@@ -142,6 +149,19 @@ func short(parts ...string) string {
 	return hex.EncodeToString(h[:6])
 }
 
+var plainID = regexp.MustCompile(`^[A-Za-z0-9._@/:+-]{1,120}$`)
+
+// idPart is site text (a file or plugin name) as part of a flag ID: as is
+// when plain, else a hash. IDs are shown outside the untrusted quotes and
+// typed back to accept, so a name with a newline or an instruction in it
+// must not become one.
+func idPart(s string) string {
+	if plainID.MatchString(s) {
+		return s
+	}
+	return "h" + short(s)
+}
+
 func sev(urgent bool) string {
 	if urgent {
 		return Urgent
@@ -155,10 +175,13 @@ func (c *checker) registration(cur *Snapshot) {
 		return
 	}
 	harmless := !slices.ContainsFunc(reg.RoleCaps, func(cap string) bool { return cap != "read" && cap != "level_0" })
+	msg := "anyone can register"
+	if !harmless {
+		msg += ", and new users get a role that can do more than read"
+	}
 	c.flag(Flag{
-		ID: "registration:" + reg.Role, Severity: sev(!harmless), Kind: "registration",
-		Message:   fmt.Sprintf("anyone can register; new users get the %q role", reg.Role),
-		Untrusted: strings.Join(reg.RoleCaps, ", "),
+		ID: "registration:" + idPart(reg.Role), Severity: sev(!harmless), Kind: "registration",
+		Message: msg, Untrusted: "default role " + reg.Role + ": " + strings.Join(reg.RoleCaps, ", "),
 	})
 }
 
@@ -212,7 +235,7 @@ func (c *checker) users(prev, cur *Snapshot, clients []string, geo Geo) {
 		}
 		for _, p := range u.AppPasswords {
 			c.flag(Flag{
-				ID: "app-password:" + p.UUID, Severity: sev(prev != nil && !appBefore[p.UUID]), Kind: "app-password",
+				ID: "app-password:" + idPart(p.UUID), Severity: sev(prev != nil && !appBefore[p.UUID]), Kind: "app-password",
 				Message:   "application password",
 				Untrusted: fmt.Sprintf("%s; name %q, created %s, last used %s from %s", who, p.Name, ts(p.Created), ts(p.LastUsed), p.LastIP),
 			})
@@ -252,9 +275,9 @@ func (c *checker) wooKeys(prev, cur *Snapshot) {
 	for _, k := range cur.WooKeys {
 		isNew := prev != nil && !before[[2]int{k.Blog, k.ID}]
 		c.flag(Flag{
-			ID: fmt.Sprintf("woo-key:%d:%d:%s", k.Blog, k.ID, k.TruncatedKey), Severity: sev(isNew && k.Permissions != "read"), Kind: "woo-key",
-			Message:   "WooCommerce REST API key with " + k.Permissions + " access",
-			Untrusted: fmt.Sprintf("user %d, %q, last access %s", k.UserID, k.Description, k.LastAccess),
+			ID: fmt.Sprintf("woo-key:%d:%d:%s", k.Blog, k.ID, idPart(k.TruncatedKey)), Severity: sev(isNew && k.Permissions != "read"), Kind: "woo-key",
+			Message:   "WooCommerce REST API key",
+			Untrusted: fmt.Sprintf("%s access, user %d, %q, last access %s", k.Permissions, k.UserID, k.Description, k.LastAccess),
 		})
 	}
 }
@@ -270,11 +293,14 @@ func (c *checker) options(prev, cur *Snapshot) {
 		}
 	}
 	for _, k := range keys {
-		if was, now := prev.Options[k], cur.Options[k]; was != now {
-			c.flag(Flag{
-				ID: "option:" + k + ":" + short(now), Severity: Urgent, Kind: "option",
-				Message: k + " changed since the last audit", Untrusted: was + " -> " + now,
-			})
+		was, now := prev.Options[k], cur.Options[k]
+		id := "option:" + idPart(k) + ":" + short(now)
+		if was != now || c.site.Pending[id] {
+			msg := "changed since the last audit"
+			if was == now {
+				msg = "changed in an earlier audit, not accepted yet"
+			}
+			c.flag(Flag{ID: id, Severity: Urgent, Kind: "option", Message: "site option " + msg, Untrusted: k + ": " + was + " -> " + now})
 		}
 	}
 }
@@ -286,7 +312,7 @@ func (c *checker) files(cur *Snapshot, exp *Repo) {
 			continue
 		}
 		c.flag(Flag{
-			ID: "upload-php:" + u.Path + ":" + firstN(u.SHA256, 12), Severity: Urgent, Kind: "file",
+			ID: "upload-php:" + idPart(u.Path) + ":" + idPart(firstN(u.SHA256, 12)), Severity: Urgent, Kind: "file",
 			Message: "executable file under uploads", Untrusted: fmt.Sprintf("%s, %d bytes, modified %s", u.Path, u.Size, ts(u.Mtime)),
 		})
 	}
@@ -311,7 +337,7 @@ func (c *checker) files(cur *Snapshot, exp *Repo) {
 				continue
 			}
 			c.flag(Flag{
-				ID: set.kind + ":" + n, Severity: Urgent, Kind: "file",
+				ID: set.kind + ":" + idPart(n), Severity: Urgent, Kind: "file",
 				Message: set.what + " on the site that the repo doesn't deploy", Untrusted: n,
 			})
 		}
@@ -321,10 +347,14 @@ func (c *checker) files(cur *Snapshot, exp *Repo) {
 func (c *checker) checksums(cur *Snapshot, exp *Repo) {
 	if exp == nil || !exp.PatchedCore {
 		for _, l := range cur.Checksums.Core {
-			if removedOnPurpose.MatchString(l) || strings.Contains(l, "installation doesn't verify against checksums") {
-				continue // the summary line; the warnings around it are the findings
+			switch {
+			case removedOnPurpose.MatchString(l), strings.Contains(l, "installation doesn't verify against checksums"):
+				// deliberate, or the summary line: the file warnings around it are the findings
+			case coreFileLine.MatchString(l):
+				c.flag(Flag{ID: "core-checksum:" + short(l), Severity: Urgent, Kind: "checksum", Message: "WordPress core file fails its checksum", Untrusted: l})
+			default: // the check itself failed (no checksums from wordpress.org, say): not a finding
+				c.note("core checksums: " + l)
 			}
-			c.flag(Flag{ID: "core-checksum:" + short(l), Severity: Urgent, Kind: "checksum", Message: "WordPress core file fails its checksum", Untrusted: l})
 		}
 	}
 	for _, p := range cur.Checksums.Plugins {
@@ -332,9 +362,12 @@ func (c *checker) checksums(cur *Snapshot, exp *Repo) {
 			continue
 		}
 		c.flag(Flag{
-			ID: "plugin-checksum:" + p.Plugin + ":" + p.File, Severity: Urgent, Kind: "checksum",
+			ID: "plugin-checksum:" + idPart(p.Plugin) + ":" + idPart(p.File), Severity: Urgent, Kind: "checksum",
 			Message: "plugin file fails its wordpress.org checksum", Untrusted: p.Plugin + "/" + p.File + ": " + p.Message,
 		})
+	}
+	if n := cur.Checksums.PluginsSkipped; n > 0 {
+		c.note(fmt.Sprintf("%d plugin(s) have no wordpress.org checksums (premium or custom), so their files weren't verified", n))
 	}
 }
 

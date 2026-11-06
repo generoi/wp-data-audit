@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,7 +65,7 @@ func ReadRepo(dir string) (*Repo, error) {
 	for _, p := range lock.Packages { // packages-dev aren't installed on production
 		types[p.Name] = p.Type
 		if set := where[installDir(p, cj.Extra.InstallerPaths)]; set != nil {
-			set[base(p.Name)] = true
+			set[cmp.Or(p.Extra.InstallerName, base(p.Name))] = true
 		}
 	}
 
@@ -133,8 +134,11 @@ func ReadRepo(dir string) (*Repo, error) {
 }
 
 type lockPackage struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Extra struct {
+		InstallerName string `json:"installer-name"` // composer/installers' folder-name override
+	} `json:"extra"`
 }
 
 // installDir is "plugins" or "mu-plugins" for a package that installs there.

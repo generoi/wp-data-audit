@@ -213,15 +213,31 @@ $wpda_host = function (string $url) use (&$wpda_self): string {
 
     return $host === '' || $host === $wpda_self ? 'self' : $host;
 };
-$wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_scan, $wpda_host): array {
+// A regex that hits PCRE's backtrack limit returns false: counted, so a scan
+// that silently missed something says so.
+$wpda_pcre = 0;
+$wpda_pm = function (string $re, string $t, &$m = null, int $flags = PREG_PATTERN_ORDER) use (&$wpda_pcre): int {
+    $r = preg_match_all($re, $t, $m, $flags);
+    if ($r === false) {
+        $wpda_pcre++;
+
+        return 0;
+    }
+
+    return $r;
+};
+$wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_scan, $wpda_host, $wpda_pm): array {
     $found = [];
     $add = function (string $kind, string $value) use (&$found, $encoded) {
         $found[$kind . "\0" . $value] = [$kind, $value, $encoded];
     };
-    if (preg_match_all('#<script\b([^>]*)>(.*?)(?:</script\s*>|$)#is', $t, $m, PREG_SET_ORDER)) {
+    if ($wpda_pm('#<script\b([^>]*)>(.*?)(?:</script\s*>|$)#is', $t, $m, PREG_SET_ORDER)) {
         foreach ($m as $s) {
-            if (preg_match('#\btype\s*=\s*["\']?[^"\'\s>]*(json|template|text/x-)#i', $s[1])) {
-                continue; // data, not code
+            // Browsers run a script without a type, a module, or a JavaScript MIME
+            // type (text/x-javascript included); anything else is data.
+            if (preg_match('#\btype\s*=\s*["\']?([^"\'\s>;]*)#i', $s[1], $type) && $type[1] !== ''
+                && ! preg_match('#^(module|(text|application)/(x-)?(java|ecma|j|live)script[0-9.]*)$#i', $type[1])) {
+                continue;
             }
             if (preg_match('#\bsrc\s*=\s*["\']?([^"\'\s>]+)#i', $s[1], $src)) {
                 $add('script-src', $wpda_host($src[1]));
@@ -230,33 +246,33 @@ $wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_sca
             }
         }
     }
-    if (preg_match_all('#<iframe\b[^>]*\bsrc\s*=\s*["\']?([^"\'\s>]+)#i', $t, $m)) {
+    if ($wpda_pm('#<iframe\b[^>]*\bsrc\s*=\s*["\']?([^"\'\s>]+)#i', $t, $m)) {
         foreach ($m[1] as $src) {
             $add('iframe', $wpda_host($src));
         }
     }
-    if (preg_match_all('#javascript\s*:[^"\'<>]{0,80}#i', $t, $m)) {
+    if ($wpda_pm('#javascript\s*:[^"\'<>]{0,80}#i', $t, $m)) {
         foreach ($m[0] as $v) {
             $add('js-url', trim($v));
         }
     }
-    if (preg_match_all('#data\s*:\s*text/(?:html|javascript)[^"\'\s<>]{0,80}#i', $t, $m)) {
+    if ($wpda_pm('#data\s*:\s*text/(?:html|javascript)[^"\'\s<>]{0,80}#i', $t, $m)) {
         foreach ($m[0] as $v) {
             $add('data-url', $v);
         }
     }
-    if (preg_match_all('#\b(?:eval|base64_decode|gzinflate|gzuncompress|str_rot13|shell_exec|passthru)\s*\([^)]{0,60}#i', $t, $m)) {
+    if ($wpda_pm('#\b(?:eval|base64_decode|gzinflate|gzuncompress|str_rot13|shell_exec|passthru)\s*\([^)]{0,60}#i', $t, $m)) {
         foreach ($m[0] as $v) {
             $add('php-call', $v);
         }
     }
-    if (preg_match_all('#<(div|span|p)\b[^>]*style\s*=\s*["\'][^"\']*(?:display\s*:\s*none|visibility\s*:\s*hidden|(?:left|top)\s*:\s*-\d{3,}px)[^>]*>(?:(?!</\1>).){0,2000}?<a\b[^>]*href\s*=\s*["\']?([^"\'\s>]+)#is', $t, $m)) {
+    if ($wpda_pm('#<(div|span|p)\b[^>]*style\s*=\s*["\'][^"\']*(?:display\s*:\s*none|visibility\s*:\s*hidden|(?:left|top)\s*:\s*-\d{3,}px)[^>]*>(?:(?!</\1>).){0,2000}?<a\b[^>]*href\s*=\s*["\']?([^"\'\s>]+)#is', $t, $m)) {
         foreach ($m[2] as $href) {
             $add('hidden-link', $wpda_host($href));
         }
     }
     if ($depth === 0) {
-        if (preg_match_all('#(?:PHNjcmlwd|PGlmcmFtZ)[A-Za-z0-9+/=]{0,4000}#', $t, $m)) {
+        if ($wpda_pm('#(?:PHNjcmlwd|PGlmcmFtZ)[A-Za-z0-9+/=]{0,4000}#', $t, $m)) {
             foreach ($m[0] as $b) {
                 $found += $wpda_scan((string) base64_decode($b), true, 1);
             }
@@ -348,6 +364,9 @@ $wpda_each(function (int $blog) use ($wpdb, $wpda_query, $wpda_like, $wpda_recor
     }
 });
 $wpda['content'] = array_values($wpda_hits);
+if ($wpda_pcre > 0) {
+    $wpda_errors[] = "content scan: {$wpda_pcre} pattern(s) hit PCRE's backtrack limit, so those values weren't fully scanned";
+}
 
 // Files: executable files under uploads, and what sits in the plugin,
 // mu-plugin and drop-in places (the Go side compares those with the repo).

@@ -96,6 +96,12 @@ func (r *Run) Finish(out []byte) (audit.Report, error) {
 	for _, d := range decisions {
 		accepted[d.ID] = true
 	}
+	pending := map[string]bool{}
+	if last, err := LastReport(r.Target); err == nil {
+		for _, f := range last.Flags {
+			pending[f.ID] = true
+		}
+	}
 	var g audit.Geo
 	path := cfg.GeoIP
 	if path == "" {
@@ -110,6 +116,7 @@ func (r *Run) Finish(out []byte) (audit.Report, error) {
 		AllowedIPs:       cfg.AllowedIPs,
 		StaffDomains:     cfg.StaffDomains,
 		Accepted:         accepted,
+		Pending:          pending,
 	}, r.repo, g)
 	report.Notes = append(slices.Clone(r.notes), report.Notes...)
 
