@@ -22,7 +22,7 @@ func TestFinishAcceptFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep, err := r.Finish([]byte(out))
+	rep, err := r.Finish([]byte(out), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func mustFinish(t *testing.T, tg Target) audit.Report {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep, err := r.Finish([]byte(out))
+	rep, err := r.Finish([]byte(out), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

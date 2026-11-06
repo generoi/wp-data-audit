@@ -2,12 +2,15 @@ package audit
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -113,6 +116,15 @@ func ReadRepo(dir string) (*Repo, error) {
 		}
 	}
 
+	if rev, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output(); err == nil {
+		exp.Revision = strings.TrimSpace(string(rev))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "vendor", "composer", "installed.json")); err != nil {
+		exp.LocalWhy = "the checkout has no composer install"
+	} else if exp.Local, err = hashTree(dir); err != nil {
+		exp.Local, exp.LocalWhy = nil, "hashing the checkout: "+err.Error()
+	}
+
 	out, err := exec.Command("git", "-C", dir, "ls-files", "-z", "--", ContentDir).Output()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-files: %w", err)
@@ -131,6 +143,58 @@ func ReadRepo(dir string) (*Repo, error) {
 		}
 	}
 	return exp, nil
+}
+
+// SameFiles reports whether the checkout at dir would install the same PHP
+// files as commit rev: nothing between them touched Composer's files, the
+// patches or web/. Then a production a few commits behind (README or
+// workflow changes since its deploy) is still compared.
+func SameFiles(dir, rev string) bool {
+	if rev == "" {
+		return false
+	}
+	cmd := exec.Command("git", "-C", dir, "diff", "--quiet", rev, "HEAD", "--",
+		"composer.json", "composer.lock", "patches.json", "patches", "web")
+	return cmd.Run() == nil // exit 1: changes; other errors (rev not fetched): unknown
+}
+
+// phpFile is what the hasher hashes: the same rule on both sides.
+var phpFile = regexp.MustCompile(`(?i)\.(php\d?|phtml|phar|pht|phps|inc)$`)
+
+// hashTree hashes a composer install's PHP files the way hasher.php does on
+// the server: core, vendor and the content dir, not uploads or Composer's
+// generated autoloaders, symlinked folders not followed.
+func hashTree(dir string) (map[string]string, error) {
+	files := map[string]string{}
+	for _, root := range []string{ContentDir, "vendor", "web/wp"} {
+		err := filepath.WalkDir(filepath.Join(dir, root), func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			rel, _ := filepath.Rel(dir, p)
+			rel = filepath.ToSlash(rel)
+			if d.IsDir() && (rel == ContentDir+"/uploads" || rel == "vendor/composer") {
+				return filepath.SkipDir
+			}
+			if !d.Type().IsRegular() || !phpFile.MatchString(d.Name()) {
+				return nil
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(b)
+			files[rel] = fmt.Sprintf("%x:%d", sum[:8], len(b))
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
 }
 
 type lockPackage struct {

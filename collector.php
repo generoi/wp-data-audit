@@ -1,10 +1,12 @@
 <?php
 
 /*
- * wp-data-audit collector, piped to `wp eval-file -`. wp-data-audit puts
- * $wpda_public_roles above this file. Read-only: it changes nothing on the
- * site and prints facts as JSON between WPDA-BEGIN and WPDA-END. Judging them
- * is the Go side's job, so rules change without touching sites.
+ * wp-data-audit collector, piped to `wp eval-file - --skip-plugins
+ * --skip-themes` (so only core, mu-plugins and drop-ins run beside it).
+ * wp-data-audit puts $wpda_public_roles above this file. Read-only: it
+ * changes nothing on the site and prints facts as JSON between WPDA-BEGIN and
+ * WPDA-END. Judging them is the Go side's job, so rules change without
+ * touching sites.
  *
  * Personal data is kept to what an audit needs. Public roles are the ones
  * anyone can get on a site: `customer` where WooCommerce runs, plus what the
@@ -52,7 +54,7 @@ $wpda = [
     'generated_at' => gmdate('c'),
     'home' => (string) get_option('home'),
     'wp_version' => (string) get_bloginfo('version'),
-    'woocommerce' => class_exists('WooCommerce'),
+    'woocommerce' => get_option('woocommerce_version') !== false, // plugins are skipped: the option, not the class
     'multisite' => is_multisite(),
 ];
 
@@ -368,56 +370,11 @@ if ($wpda_pcre > 0) {
     $wpda_errors[] = "content scan: {$wpda_pcre} pattern(s) hit PCRE's backtrack limit, so those values weren't fully scanned";
 }
 
-// Files: executable files under uploads, and what sits in the plugin,
-// mu-plugin and drop-in places (the Go side compares those with the repo).
-$wpda['files'] = ['uploads_php' => [], 'uploads_truncated' => false];
-$wpda_up = wp_upload_dir(null, false);
-$wpda_base = (string) ($wpda_up['basedir'] ?? '');
-if ($wpda_base !== '' && is_dir($wpda_base)) {
-    try {
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($wpda_base, FilesystemIterator::SKIP_DOTS));
-        foreach ($it as $f) {
-            if (! $f->isFile() || ! preg_match('/\.(php\d?|phtml|phar|pht|phps)$/i', $f->getFilename())) {
-                continue;
-            }
-            if (count($wpda['files']['uploads_php']) >= $wpda_max) {
-                $wpda['files']['uploads_truncated'] = true;
-                break;
-            }
-            $size = (int) $f->getSize();
-            $body = $size <= 1048576 ? (string) file_get_contents($f->getPathname()) : null;
-            $wpda['files']['uploads_php'][] = [
-                'path' => substr($f->getPathname(), strlen($wpda_base) + 1),
-                'size' => $size,
-                'mtime' => (int) $f->getMTime(),
-                'sha256' => $body !== null ? hash('sha256', $body) : '',
-                // empty, or a "Silence is golden" directory guard: harmless
-                'silence' => $size === 0 || ($size <= 200 && stripos((string) $body, 'silence is golden') !== false),
-            ];
-        }
-    } catch (Throwable $e) {
-        $wpda_errors[] = 'uploads scan: ' . $e->getMessage();
-    }
-}
-$wpda_ls = function (string $dir, bool $phpOnly = false): array {
-    $out = [];
-    foreach (is_dir($dir) ? (scandir($dir) ?: []) : [] as $name) {
-        if ($name[0] === '.' || $name === 'index.php') {
-            continue;
-        }
-        if ($phpOnly ? (is_file("$dir/$name") && str_ends_with($name, '.php')) : true) {
-            $out[] = $name;
-        }
-    }
+// Files are the hasher's (hasher.php), which runs without WordPress.
 
-    return $out;
-};
-$wpda['files']['plugins'] = $wpda_ls(WP_PLUGIN_DIR);
-$wpda['files']['mu_plugins'] = $wpda_ls(WPMU_PLUGIN_DIR);
-$wpda['files']['dropins'] = $wpda_ls(WP_CONTENT_DIR, true);
-
-// Checksums against wordpress.org: core, and the wp.org plugins (premium
-// ones have none and are only counted as skipped).
+// Checksums against wordpress.org, for sites whose files can't be compared
+// with a local install of the deployed commit: core, and the wp.org plugins
+// (premium ones have none and are only counted as skipped).
 $wpda['checksums'] = ['core' => [], 'plugins' => [], 'plugins_skipped' => 0];
 try {
     $r = WP_CLI::runcommand('core verify-checksums', ['return' => 'all', 'exit_error' => false, 'launch' => false]);

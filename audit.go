@@ -21,6 +21,20 @@ import (
 //go:embed collector.php
 var collector string
 
+// Hasher is the PHP to pipe to `wp eval-file - --skip-wordpress` on the
+// site: the release's PHP files and their hashes, read without loading any
+// site code (ParseRelease reads its output).
+//
+//go:embed hasher.php
+var Hasher string
+
+// WPArgs are the wp-cli flags to run Script with: plugins and themes stay
+// unloaded, so they can't interfere with what it reports.
+var WPArgs = []string{"eval-file", "-", "--skip-plugins", "--skip-themes"}
+
+// HasherArgs are the wp-cli flags to run Hasher with.
+var HasherArgs = []string{"eval-file", "-", "--skip-wordpress"}
+
 var (
 	roleRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
 	siteRE = regexp.MustCompile(`^[a-z0-9.-]+$`)
@@ -56,25 +70,40 @@ func Script(publicRoles map[string][]string) (string, error) {
 }
 
 // Parse reads the snapshot from the collector's output, ignoring anything
-// plugins printed around it.
+// printed around it.
 func Parse(out []byte) (*Snapshot, error) {
-	s := string(out)
-	_, rest, ok := strings.Cut(s, "\nWPDA-BEGIN\n")
+	var snap Snapshot
+	if err := block(out, "collector", &snap, &snap.Version); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
+// ParseRelease reads the hasher's output.
+func ParseRelease(out []byte) (*Release, error) {
+	var r Release
+	if err := block(out, "hasher", &r, &r.Version); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func block(out []byte, what string, v any, version *int) error {
+	_, rest, ok := strings.Cut(string(out), "\nWPDA-BEGIN\n")
 	if !ok {
-		return nil, errors.New("no WPDA-BEGIN in the collector's output")
+		return fmt.Errorf("no WPDA-BEGIN in the %s's output", what)
 	}
 	body, _, ok := strings.Cut(rest, "\nWPDA-END")
 	if !ok {
-		return nil, errors.New("no WPDA-END in the collector's output (cut short?)")
+		return fmt.Errorf("no WPDA-END in the %s's output (cut short?)", what)
 	}
-	var snap Snapshot
-	if err := json.Unmarshal([]byte(body), &snap); err != nil {
-		return nil, fmt.Errorf("collector output: %w", err)
+	if err := json.Unmarshal([]byte(body), v); err != nil {
+		return fmt.Errorf("%s output: %w", what, err)
 	}
-	if snap.Version != 1 {
-		return nil, fmt.Errorf("collector output version %d, want 1", snap.Version)
+	if *version != 1 {
+		return fmt.Errorf("%s output version %d, want 1", what, *version)
 	}
-	return &snap, nil
+	return nil
 }
 
 // Snapshot is what the collector printed.
@@ -92,9 +121,23 @@ type Snapshot struct {
 	WooKeys          []WooKey          `json:"woo_keys"`
 	Content          []Match           `json:"content"`
 	ContentTruncated bool              `json:"content_truncated"`
-	Files            Files             `json:"files"`
 	Checksums        Checksums         `json:"checksums"`
 	Errors           []string          `json:"errors"`
+	// Release is the hasher's file list, joined in by the caller (runner);
+	// nil when it didn't run.
+	Release *Release `json:"release,omitempty"`
+}
+
+// Release is the hasher's output: every PHP file of the release and under
+// uploads, path (from the root) → "<sha256, 16 hex>:<size>[:silence]".
+type Release struct {
+	Version   int               `json:"version"`
+	Root      string            `json:"root"`
+	Revision  string            `json:"revision"` // Deployer's REVISION: the deployed commit
+	Content   string            `json:"content"`  // web/app (Bedrock) or wp-content
+	Files     map[string]string `json:"files"`
+	Truncated bool              `json:"truncated"`
+	Errors    []string          `json:"errors"`
 }
 
 type Registration struct {
@@ -163,22 +206,6 @@ type Location struct {
 	ID    int64  `json:"id"`
 	Field string `json:"field"`
 	Key   string `json:"key"`
-}
-
-type Files struct {
-	UploadsPHP       []File   `json:"uploads_php"`
-	UploadsTruncated bool     `json:"uploads_truncated"`
-	Plugins          []string `json:"plugins"`
-	MuPlugins        []string `json:"mu_plugins"`
-	Dropins          []string `json:"dropins"`
-}
-
-type File struct {
-	Path    string `json:"path"`
-	Size    int64  `json:"size"`
-	Mtime   int64  `json:"mtime"`
-	SHA256  string `json:"sha256"`
-	Silence bool   `json:"silence"`
 }
 
 type Checksums struct {

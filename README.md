@@ -1,9 +1,12 @@
 # wp-data-audit
 
 A light, read-only security audit of a WordPress site's data, meant to run
-during monthly maintenance. A PHP collector is piped to `wp eval-file -` on the
-site (nothing is installed or written there), prints facts as JSON, and Go
-compares them with the previous run and the flags a person has accepted. No
+during monthly maintenance. Two PHP scripts are piped to `wp eval-file -` on
+the site (nothing is installed or written there): a collector that reads the
+database with plugins and themes unloaded, and a hasher that lists the
+release's PHP files with `--skip-wordpress`, so no code on the site can change
+what it reports. Go compares their facts with a composer install of the
+deployed commit, the previous run and the flags a person has accepted. No
 model is involved: a clean site costs nothing to check.
 
 It flags:
@@ -20,8 +23,15 @@ It flags:
 - changes to `siteurl`, `home` and `admin_email`
 - PHP files under uploads; plugins, mu-plugins and drop-ins the repo doesn't
   deploy
-- core and wordpress.org plugin files that fail their checksums (patched
-  packages are skipped)
+- every PHP file of the release (core, `vendor/`, plugins including premium
+  ones, mu-plugins, themes, drop-ins) that differs from a composer install of
+  the deployed commit, one flag per package or theme. The deployed commit is
+  Deployer's `REVISION` file, else GitHub's last successful
+  `deploy_production.yml` run; a checkout a few commits ahead still counts
+  when nothing deployed changed in between. Without a local install it falls
+  back to wordpress.org's checksums for core and wp.org plugins. Compiled
+  caches, built `build/` files and WordPress's own translation updates can't
+  be compared and are only counted
 - scripts, iframes, `javascript:` and `data:` URLs, PHP calls and hidden links in
   posts, meta, options, terms and approved comments, plain or encoded
 
@@ -34,7 +44,8 @@ so one accepted value is accepted wherever it appears.
 
 ## Use
 
-From a Bedrock site's checkout, at the deployed commit:
+From a Bedrock site's checkout at the deployed commit, after `composer
+install` (for the file comparison; `gh` finds the deployed commit):
 
 ```sh
 wp-data-audit geoip-update        # once a month
@@ -73,9 +84,12 @@ emails and login IPs).
 
 ## As a library
 
-`runner.Prepare` reads the repo and returns the PHP to pipe however you reach
-the site; `Run.Finish` judges the output and saves snapshot and report in the
-same state the CLI uses, and `runner.Accept` records a decision. Underneath,
+`runner.Prepare` reads the repo and returns the two scripts to pipe however
+you reach the site (`Run.Script` with `audit.WPArgs`, `Run.Hasher` with
+`audit.HasherArgs`); `Run.Finish` judges both outputs and saves snapshot and
+report in the same state the CLI uses, and `runner.Accept` records a
+decision. Set `Target.Deployed` (`runner.DeployedCommit`) when the server has
+no `REVISION` file. Underneath,
 `audit.Script`, `audit.Parse`, `audit.ReadRepo` and `audit.Check` do one step
 each. `Flag.Untrusted` is text from the site, possibly written by an attacker:
 show it as data, and keep accepting flags a person's decision.

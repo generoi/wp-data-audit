@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	audit "github.com/generoi/wp-data-audit"
@@ -40,17 +41,23 @@ func LoadConfig() (Config, error) {
 }
 
 // Target is one site environment. State is kept per Site and Env; Repo is
-// its checkout at the deployed commit.
+// its checkout at the deployed commit. Deployed is that commit when the
+// caller knows it (GitHub's last successful deploy run, say) and the server
+// has no Deployer REVISION file: files are only compared when the checkout
+// is at it.
 type Target struct {
 	Site, Env, Repo string
+	Deployed        string
 }
 
-// Run is one audit between Prepare and Finish.
+// Run is one audit between Prepare and Finish: pipe Script to wp-cli with
+// audit.WPArgs and Hasher with audit.HasherArgs, then Finish with both
+// outputs.
 type Run struct {
 	Target
-	Script string
-	repo   *audit.Repo
-	notes  []string
+	Script, Hasher string
+	repo           *audit.Repo
+	notes          []string
 }
 
 // Prepare reads the repo and builds the script.
@@ -69,16 +76,35 @@ func Prepare(t Target) (*Run, error) {
 	if r.Script, err = audit.Script(roles); err != nil {
 		return nil, err
 	}
+	r.Hasher = audit.Hasher
 	return r, nil
 }
 
-// Finish judges the collector's output against the last snapshot, saves the
-// new snapshot and the report, and returns the report.
-func (r *Run) Finish(out []byte) (audit.Report, error) {
+// Finish judges the collector's and hasher's output against the last
+// snapshot, saves the new snapshot and the report, and returns the report.
+// A hasher that failed is a note, not a failed audit.
+func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 	snap, err := audit.Parse(out)
 	if err != nil {
 		return audit.Report{}, err
 	}
+	if rel, err := audit.ParseRelease(hashed); err == nil {
+		if rel.Revision == "" {
+			rel.Revision = r.Deployed
+		}
+		snap.Release = rel
+		if r.repo != nil && rel.Revision != "" && !strings.HasPrefix(r.repo.Revision, rel.Revision) && audit.SameFiles(r.Repo, rel.Revision) {
+			r.notes = append(r.notes, fmt.Sprintf("production runs %.12s, the checkout %.12s; nothing deployed changed between them, so files were compared", rel.Revision, r.repo.Revision))
+			r.repo.Revision = rel.Revision
+		}
+	} else {
+		r.notes = append(r.notes, "hasher: "+err.Error())
+	}
+	unlock, err := lock()
+	if err != nil {
+		return audit.Report{}, err
+	}
+	defer unlock()
 	cfg, err := LoadConfig()
 	if err != nil {
 		return audit.Report{}, err
@@ -96,10 +122,10 @@ func (r *Run) Finish(out []byte) (audit.Report, error) {
 	for _, d := range decisions {
 		accepted[d.ID] = true
 	}
-	pending := map[string]bool{}
+	pending := map[string]string{}
 	if last, err := LastReport(r.Target); err == nil {
 		for _, f := range last.Flags {
-			pending[f.ID] = true
+			pending[f.ID] = f.Severity
 		}
 	}
 	var g audit.Geo
@@ -148,6 +174,11 @@ func Accept(t Target, ids []string, reason, by string, everywhere bool) error {
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("accept: say why (the reason is what the next audit's triage reads)")
 	}
+	unlock, err := lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	last, err := LastReport(t)
 	if err != nil {
 		return fmt.Errorf("no audit to accept from: %w", err)
@@ -188,6 +219,24 @@ func Decisions(t Target) ([]Decision, error) {
 	return all, nil
 }
 
+// lock serialises every write to the state (audits finishing, accepts from
+// the CLI and from foreman's page), so no decision is lost to a race.
+func lock() (func(), error) {
+	path := filepath.Join(home("XDG_STATE_HOME", ".local/state"), "wp-data-audit", ".lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
 func everywherePath() string {
 	return filepath.Join(home("XDG_STATE_HOME", ".local/state"), "wp-data-audit", "accepted-everywhere.json")
 }
@@ -223,6 +272,25 @@ func LastReport(t Target) (audit.Report, error) {
 // owner-only: they hold staff emails and login IPs.
 func StateDir(t Target) string {
 	return filepath.Join(home("XDG_STATE_HOME", ".local/state"), "wp-data-audit", t.Site, t.Env)
+}
+
+// DeployedCommit is the commit of the checkout's repo's last successful
+// production deploy run on GitHub (workflow deploy_production.yml), via gh;
+// "" when it can't tell. The fleet deploys a built artifact, so the server
+// has no REVISION file of its own.
+func DeployedCommit(repo string) string {
+	cmd := exec.Command("gh", "run", "list", "--workflow", "deploy_production.yml", "--status", "success",
+		"--limit", "1", "--json", "headSha", "--jq", ".[0].headSha")
+	cmd.Dir = repo
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	sha := strings.TrimSpace(string(out))
+	if len(sha) != 40 {
+		return ""
+	}
+	return sha
 }
 
 // SiteName is the origin repo's name, so worktrees share their checkout's

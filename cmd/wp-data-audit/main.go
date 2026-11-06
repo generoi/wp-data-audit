@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
+	audit "github.com/generoi/wp-data-audit"
 	"github.com/generoi/wp-data-audit/geo"
 	"github.com/generoi/wp-data-audit/runner"
 )
@@ -94,25 +96,26 @@ func auditSite(args []string) error {
 		return err
 	}
 	t := target()
+	if t.Env == "production" {
+		t.Deployed = runner.DeployedCommit(t.Repo)
+	}
 	r, err := runner.Prepare(t)
 	if err != nil {
 		return err
 	}
-	argv := []string{"vendor/bin/wp", "@" + t.Env}
+	base := []string{"vendor/bin/wp", "@" + t.Env}
 	if *wp != "" {
-		argv = strings.Fields(*wp)
+		base = strings.Fields(*wp)
 	}
-	argv = append(argv, "eval-file", "-")
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = t.Repo
-	cmd.Stdin = strings.NewReader(r.Script)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+	out, err := runWP(t.Repo, append(slices.Clone(base), audit.WPArgs...), r.Script)
+	if err != nil {
+		return err
 	}
-	report, err := r.Finish(out.Bytes())
+	hashed, err := runWP(t.Repo, append(slices.Clone(base), audit.HasherArgs...), r.Hasher)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err) // a note in the report; the rest still counts
+	}
+	report, err := r.Finish(out, hashed)
 	if err != nil {
 		return err
 	}
@@ -132,4 +135,18 @@ func auditSite(args []string) error {
 		return exitCode(1)
 	}
 	return nil
+}
+
+// runWP pipes script to argv in dir and returns its stdout.
+func runWP(dir string, argv []string, script string) ([]byte, error) {
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(script)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+	}
+	return out.Bytes(), nil
 }

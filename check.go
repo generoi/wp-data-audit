@@ -55,10 +55,11 @@ type Site struct {
 	AllowedIPs       []string        // IPs or CIDR ranges never flagged, whatever their country
 	StaffDomains     []string        // email domains of the people who run the site
 	Accepted         map[string]bool // flag IDs a person accepted
-	// Pending are the last report's flag IDs. A change caught by comparing
-	// with the previous snapshot (an option's new value) stays flagged until
-	// accepted, instead of only on the run that saw it.
-	Pending map[string]bool
+	// Pending are the last report's flags, ID → severity. A change caught by
+	// comparing with the previous snapshot (an option's new value, a new
+	// admin) stays flagged, and urgent, until accepted, however often the
+	// audit runs in between.
+	Pending map[string]string
 }
 
 // Repo is what the site's repo says: what it deploys (plugin, mu-plugin and
@@ -71,6 +72,11 @@ type Repo struct {
 	PatchedCore                 bool
 	PublicRoles                 map[string][]string
 	ClientDomains               []string
+	// Revision is the checkout's commit; Local its composer install's PHP
+	// files hashed like the server's (nil, with LocalWhy, when there's none).
+	Revision string
+	Local    map[string]string
+	LocalWhy string
 }
 
 // Geo resolves an IP to an ISO country code, "" when unknown.
@@ -109,8 +115,9 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 	c.users(prev, cur, clients, geo)
 	c.wooKeys(prev, cur)
 	c.options(prev, cur)
-	c.files(cur, exp)
-	c.checksums(cur, exp)
+	if !c.files(cur, exp) { // compared with the deployed commit: wordpress.org's checksums add nothing
+		c.checksums(cur, exp)
+	}
 	c.content(cur)
 	for _, e := range cur.Errors {
 		c.note("collector: " + e)
@@ -137,9 +144,13 @@ func (c *checker) allowedIP(ip string) bool {
 }
 
 func (c *checker) flag(f Flag) {
-	if !c.site.Accepted[f.ID] {
-		c.r.Flags = append(c.r.Flags, f)
+	if c.site.Accepted[f.ID] {
+		return
 	}
+	if c.site.Pending[f.ID] == Urgent {
+		f.Severity = Urgent
+	}
+	c.r.Flags = append(c.r.Flags, f)
 }
 
 func (c *checker) note(s string) { c.r.Notes = append(c.r.Notes, s) }
@@ -295,7 +306,7 @@ func (c *checker) options(prev, cur *Snapshot) {
 	for _, k := range keys {
 		was, now := prev.Options[k], cur.Options[k]
 		id := "option:" + idPart(k) + ":" + short(now)
-		if was != now || c.site.Pending[id] {
+		if was != now || c.site.Pending[id] != "" {
 			msg := "changed since the last audit"
 			if was == now {
 				msg = "changed in an earlier audit, not accepted yet"
@@ -305,43 +316,173 @@ func (c *checker) options(prev, cur *Snapshot) {
 	}
 }
 
-func (c *checker) files(cur *Snapshot, exp *Repo) {
-	f := cur.Files
-	for _, u := range f.UploadsPHP {
-		if u.Silence {
+// files judges the hasher's file list: PHP under uploads; plugins,
+// mu-plugins and drop-ins the repo doesn't deploy; and every other PHP file
+// against a composer install of the deployed commit. It reports whether that
+// comparison ran (the wordpress.org checksums are then redundant).
+func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
+	rel := cur.Release
+	if rel == nil {
+		c.note("the hasher didn't run: no PHP file was checked")
+		return false
+	}
+	for _, e := range rel.Errors {
+		c.note("hasher: " + e)
+	}
+	if rel.Truncated {
+		c.note("the hasher stopped at its file limit: not every PHP file was checked")
+	}
+	content := rel.Content
+	uploads := content + "/uploads/"
+	paths := slices.Sorted(maps.Keys(rel.Files))
+	units := map[string]bool{} // undeployed plugins etc., flagged once as a whole
+	for _, p := range paths {
+		v := rel.Files[p]
+		if rest, ok := strings.CutPrefix(p, uploads); ok {
+			if !strings.HasSuffix(v, ":silence") {
+				c.flag(Flag{
+					ID: "upload-php:" + idPart(rest) + ":" + idPart(fileHash(v)), Severity: Urgent, Kind: "file",
+					Message: "executable file under uploads", Untrusted: rest + " (" + v + ")",
+				})
+			}
 			continue
 		}
+		if exp == nil {
+			continue
+		}
+		kind, name := placed(p, content)
+		want := map[string]map[string]bool{"plugin": exp.Plugins, "mu-plugin": exp.MuPlugins, "dropin": exp.Dropins}[kind]
+		if want == nil || want[name] || (kind == "mu-plugin" && hostMuPlugins[name]) || units[kind+name] {
+			continue
+		}
+		units[kind+name] = true
 		c.flag(Flag{
-			ID: "upload-php:" + idPart(u.Path) + ":" + idPart(firstN(u.SHA256, 12)), Severity: Urgent, Kind: "file",
-			Message: "executable file under uploads", Untrusted: fmt.Sprintf("%s, %d bytes, modified %s", u.Path, u.Size, ts(u.Mtime)),
+			ID: kind + ":" + idPart(name), Severity: Urgent, Kind: "file",
+			Message: kind + " on the site that the repo doesn't deploy", Untrusted: name,
 		})
 	}
-	if f.UploadsTruncated {
-		c.note("uploads scan stopped at its limit: more PHP files than listed")
+	switch {
+	case exp == nil:
+		c.note("no repo to compare with: plugins and PHP files not checked")
+		return false
+	case exp.Local == nil:
+		c.note("PHP files not compared with the deployed commit: " + exp.LocalWhy)
+		return false
+	case rel.Revision != "" && exp.Revision != "" && !strings.HasPrefix(exp.Revision, rel.Revision) && !strings.HasPrefix(rel.Revision, exp.Revision):
+		c.note(fmt.Sprintf("PHP files not compared: production runs %s, the checkout is at %.12s", firstN(rel.Revision, 12), exp.Revision))
+		return false
+	case rel.Revision == "":
+		c.note("the deployed commit is unknown (no REVISION file, no deploy run found): PHP files compared with the checkout as it is")
 	}
-	if exp == nil {
-		c.note("no repo to compare with: plugins, mu-plugins and drop-ins not checked")
-		return
-	}
-	for _, set := range []struct {
-		kind, what string
-		names      []string
-		want       map[string]bool
-	}{
-		{"plugin", "plugin", f.Plugins, exp.Plugins},
-		{"mu-plugin", "mu-plugin", f.MuPlugins, exp.MuPlugins},
-		{"dropin", "drop-in", f.Dropins, exp.Dropins},
-	} {
-		for _, n := range set.names {
-			if set.want[n] || (set.kind == "mu-plugin" && hostMuPlugins[n]) {
-				continue
-			}
-			c.flag(Flag{
-				ID: set.kind + ":" + idPart(n), Severity: Urgent, Kind: "file",
-				Message: set.what + " on the site that the repo doesn't deploy", Untrusted: n,
-			})
+
+	// One flag per package or theme, its ID covering every differing file, so
+	// accepting it holds until any of them changes again.
+	type diff struct{ changed, extra []string }
+	diffs := map[string]*diff{}
+	skipped := map[string]int{}
+	for _, p := range paths {
+		if strings.HasPrefix(p, uploads) {
+			continue
+		}
+		kind, name := placed(p, content)
+		if units[kind+name] || (kind == "mu-plugin" && hostMuPlugins[name]) {
+			continue // flagged as a whole, or the host's
+		}
+		u := unit(p, content)
+		lv, ok := exp.Local[p]
+		switch {
+		case ok && fileHash(lv) == fileHash(rel.Files[p]):
+			continue
+		case u == content+"/languages":
+			skipped["translation files WordPress updates itself (languages)"]++
+			continue
+		case !ok && (u == content+"/cache" || strings.Contains(p, "/storage/framework/")):
+			skipped["caches the site compiles itself (cache/, Acorn's storage/framework/)"]++
+			continue
+		case !ok && strings.Contains(p, "/build/"):
+			skipped["built files the checkout hasn't built (build/)"]++
+			continue
+		}
+		d := diffs[u]
+		if d == nil {
+			d = &diff{}
+			diffs[u] = d
+		}
+		if ok {
+			d.changed = append(d.changed, p)
+		} else {
+			d.extra = append(d.extra, p)
 		}
 	}
+	for _, u := range slices.Sorted(maps.Keys(diffs)) {
+		d := diffs[u]
+		var sig []string
+		for _, p := range append(slices.Clone(d.changed), d.extra...) {
+			sig = append(sig, p+"="+fileHash(rel.Files[p]))
+		}
+		slices.Sort(sig)
+		all := append(slices.Clone(d.changed), d.extra...)
+		if len(all) > 5 {
+			all = append(all[:5], fmt.Sprintf("and %d more", len(all)-5))
+		}
+		c.flag(Flag{
+			ID: "release:" + idPart(u) + ":" + short(sig...), Severity: Urgent, Kind: "release",
+			Message:   fmt.Sprintf("PHP files differ from the deployed commit: %d changed, %d not in the release", len(d.changed), len(d.extra)),
+			Untrusted: u + ": " + strings.Join(all, ", "),
+		})
+	}
+	for what, n := range skipped {
+		c.note(fmt.Sprintf("%d PHP file(s) not compared: %s", n, what))
+	}
+	return true
+}
+
+// fileHash is the hash part of a hasher value.
+func fileHash(v string) string {
+	h, _, _ := strings.Cut(v, ":")
+	return h
+}
+
+// placed says what p is under content: a plugin, mu-plugin or drop-in and
+// its name (its folder, or the file for a single-file one); "" for the rest.
+func placed(p, content string) (kind, name string) {
+	rest, ok := strings.CutPrefix(p, content+"/")
+	if !ok {
+		return "", ""
+	}
+	parts := strings.SplitN(rest, "/", 3)
+	switch {
+	case len(parts) == 1:
+		return "dropin", parts[0]
+	case parts[0] == "plugins" && parts[1] != "index.php":
+		return "plugin", parts[1]
+	case parts[0] == "mu-plugins" && parts[1] != "index.php":
+		return "mu-plugin", parts[1]
+	}
+	return "", ""
+}
+
+// unit is what a differing file belongs to, one flag per unit: a plugin,
+// mu-plugin, theme or vendor package, core, or a content subfolder.
+func unit(p, content string) string {
+	parts := strings.Split(p, "/")
+	if rest, ok := strings.CutPrefix(p, content+"/"); ok {
+		sub := strings.Split(rest, "/")
+		switch {
+		case len(sub) == 1:
+			return p
+		case (sub[0] == "plugins" || sub[0] == "mu-plugins" || sub[0] == "themes") && len(sub) > 2:
+			return content + "/" + sub[0] + "/" + sub[1]
+		}
+		return content + "/" + sub[0]
+	}
+	switch {
+	case parts[0] == "vendor" && len(parts) > 3:
+		return strings.Join(parts[:3], "/")
+	case parts[0] == "web" && len(parts) > 1 && parts[1] == "wp", parts[0] == "wp-includes", parts[0] == "wp-admin":
+		return "core"
+	}
+	return parts[0]
 }
 
 func (c *checker) checksums(cur *Snapshot, exp *Repo) {
