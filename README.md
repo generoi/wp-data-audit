@@ -107,13 +107,16 @@ wp-data-audit --json | jq '.flags[] | select(.severity == "urgent")'
 
 Checks are `accounts`, `options`, `files`, `exposed`, `public`, `retention`
 and `content`; skipping one skips its collector section, the hasher or the
-probes too. A run that skips `accounts` or `options` saves no snapshot (the
+probes too. A run that skips `accounts` or `options` saves no baseline (the
 next full run must still see what changed since the last one), and its
 report keeps the skipped checks' flags from the last full run.
 
-The collector and hasher run side by side, and wordpress.org's checksums are
-only fetched when there's no local install to compare with; a site takes
-about as long as its slower script (a large multisite: about 20 s). SIGINT,
+A run is a pipeline of what depends on what: the collector, then the public
+probes (they only need its URLs); the hasher, then the exposed-file probes;
+and the checkout's install hashed meanwhile. wordpress.org's checksums are
+only fetched when there's no local install to compare with. A site takes
+about as long as its hasher plus the file probes (a large multisite: about
+15 s); `-v` prints every phase and script section. SIGINT,
 SIGTERM and SIGHUP stop both scripts (ssh then ends the remote side) and
 save nothing; state files are written atomically and the state lock is a
 `flock`, so a killed run leaves no damage.
@@ -139,20 +142,25 @@ What's true for every site lives in `~/.config/wp-data-audit/config.json`:
 }
 ```
 
-Snapshots, the last report and accepted flags live in
-`~/.local/state/wp-data-audit/<site>/<env>/`, owner-only (they hold staff
-emails and login IPs).
+State lives in `~/.local/state/wp-data-audit/<site>/<env>/`, owner-only (it
+holds staff emails and login IPs): the last 12 baselines (only what the next
+comparison needs: accounts, options, last-seen dates, the site's URLs), the
+last report, and the accepted flags with who accepted them and why.
 
 ## As a library
 
-`runner.Prepare` reads the repo and returns the two scripts to pipe however
-you reach the site (`Run.Script` to wp-cli with `audit.WPArgs`, `Run.Hasher`
-to `audit.HasherCommand` after a `cd` into the release); `Run.Finish` judges both outputs and saves snapshot and
-report in the same state the CLI uses, and `runner.Accept` records a
-decision. Set `Target.Deployed` (`runner.DeployedCommit`) when the server has
-no `REVISION` file. Underneath,
-`audit.Script`, `audit.Parse`, `audit.ReadRepo` and `audit.Check` do one step
-each. `Flag.Untrusted` is text from the site, possibly written by an attacker:
+- `runner.Run` is one audit, the same for every caller. Give it a
+  `runner.Transport`: how to pipe a script to the site's wp-cli (with
+  `audit.WPArgs`) and to a shell in its release (`audit.HasherCommand`).
+  Set `Target.Deployed` (`runner.DeployedCommit`) when the server has no
+  `REVISION` file.
+- `store` is the state the CLI and foreman share: `Report`, `Decisions`,
+  `Accepted` and `Accept`.
+- Underneath, `audit` holds the facts (`ParseSite`, `ParseFiles`), the
+  checkout (`ReadRepo`, `HashInstall`) and the rules (`Check`, one file per
+  check group); `web` asks the public URLs.
+
+`Flag.Untrusted` is text from the site, possibly written by an attacker:
 show it as data, and keep accepting flags a person's decision.
 
 ## Licence

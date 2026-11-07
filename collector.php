@@ -408,6 +408,15 @@ $wpda_record = function (string $table, int $id, string $field, string $key, ?st
     }
 };
 $wpda_patterns = ['<script', '&lt;script', '%3cscript', '<iframe', '&lt;iframe', 'javascript:', 'data:text/', 'PHNjcmlwd', 'PGlmcmFtZ', 'eval(', 'base64_decode(', 'gzinflate(', 'gzuncompress(', 'str_rot13(', 'shell_exec(', 'passthru(', 'display:none', 'display: none', 'visibility:hidden', 'visibility: hidden'];
+// Candidate rows are found in SQL and scanned exactly in PHP. One REGEXP over
+// the lowercased columns is several times faster than a case-insensitive LIKE
+// per pattern and column; the LIKEs stay as the fallback for a database that
+// rejects the regex.
+$wpda_regexp = function (array $cols) use ($wpdb, $wpda_patterns): string {
+    $alts = implode('|', array_map(fn ($p) => preg_quote(strtolower($p), '/'), $wpda_patterns));
+
+    return $wpdb->prepare('LOWER(CONCAT_WS(\' \', ' . implode(', ', $cols) . ')) REGEXP %s', $alts);
+};
 $wpda_like = function (array $cols) use ($wpdb, $wpda_patterns): string {
     $or = [];
     foreach ($cols as $col) {
@@ -418,8 +427,11 @@ $wpda_like = function (array $cols) use ($wpdb, $wpda_patterns): string {
 
     return '(' . implode(' OR ', $or) . ')';
 };
-$wpda_query = function (string $sql) use ($wpdb, &$wpda, $wpda_rows, &$wpda_errors): array {
-    $rows = $wpdb->get_results($sql . " LIMIT {$wpda_rows}");
+$wpda_query = function (string $sql, array $cols) use ($wpdb, &$wpda, $wpda_rows, &$wpda_errors, $wpda_regexp, $wpda_like): array {
+    $rows = $wpdb->get_results($sql . $wpda_regexp($cols) . " LIMIT {$wpda_rows}");
+    if ($wpdb->last_error) {
+        $rows = $wpdb->get_results($sql . $wpda_like($cols) . " LIMIT {$wpda_rows}");
+    }
     if ($wpdb->last_error) {
         $wpda_errors[] = 'content query: ' . $wpdb->last_error;
     }
@@ -430,29 +442,29 @@ $wpda_query = function (string $sql) use ($wpdb, &$wpda, $wpda_rows, &$wpda_erro
     return $rows;
 };
 
-empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpda_query, $wpda_like, $wpda_record, &$wpda_self, &$wpda_cur_blog) {
+empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpda_query, $wpda_record, &$wpda_self, &$wpda_cur_blog) {
     $wpda_cur_blog = $blog;
     $wpda_self = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
-    foreach ($wpda_query("SELECT ID, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND " . $wpda_like(['post_title', 'post_content', 'post_excerpt'])) as $r) {
+    foreach ($wpda_query("SELECT ID, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND ", ['post_title', 'post_content', 'post_excerpt']) as $r) {
         $wpda_record('posts', (int) $r->ID, 'post_title', '', $r->post_title);
         $wpda_record('posts', (int) $r->ID, 'post_content', '', $r->post_content);
         $wpda_record('posts', (int) $r->ID, 'post_excerpt', '', $r->post_excerpt);
     }
     // _oembed_* is WordPress's cache of embed HTML for URLs already in content.
-    foreach ($wpda_query("SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_oembed\\_%' AND " . $wpda_like(['meta_value'])) as $r) {
+    foreach ($wpda_query("SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_oembed\\_%' AND ", ['meta_value']) as $r) {
         $wpda_record('postmeta', (int) $r->post_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
     }
-    foreach ($wpda_query("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' AND " . $wpda_like(['option_value'])) as $r) {
+    foreach ($wpda_query("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' AND ", ['option_value']) as $r) {
         $wpda_record('options', 0, 'option_value', (string) $r->option_name, $r->option_value);
     }
-    foreach ($wpda_query("SELECT t.term_id, t.name, tt.description FROM {$wpdb->terms} t JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id WHERE " . $wpda_like(['t.name', 'tt.description'])) as $r) {
+    foreach ($wpda_query("SELECT t.term_id, t.name, tt.description FROM {$wpdb->terms} t JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id WHERE ", ['t.name', 'tt.description']) as $r) {
         $wpda_record('terms', (int) $r->term_id, 'name', '', $r->name);
         $wpda_record('terms', (int) $r->term_id, 'description', '', $r->description);
     }
-    foreach ($wpda_query("SELECT term_id, meta_key, meta_value FROM {$wpdb->termmeta} WHERE " . $wpda_like(['meta_value'])) as $r) {
+    foreach ($wpda_query("SELECT term_id, meta_key, meta_value FROM {$wpdb->termmeta} WHERE ", ['meta_value']) as $r) {
         $wpda_record('termmeta', (int) $r->term_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
     }
-    foreach ($wpda_query("SELECT comment_ID, comment_content FROM {$wpdb->comments} WHERE comment_approved = '1' AND " . $wpda_like(['comment_content'])) as $r) {
+    foreach ($wpda_query("SELECT comment_ID, comment_content FROM {$wpdb->comments} WHERE comment_approved = '1' AND ", ['comment_content']) as $r) {
         $wpda_record('comments', (int) $r->comment_ID, 'comment_content', '', $r->comment_content);
     }
 });

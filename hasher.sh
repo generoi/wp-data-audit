@@ -31,6 +31,9 @@ fi
 content=web/app core=web/wp
 [ -d web/app ] || { content=wp-content core="wp-includes wp-admin"; }
 echo "CONTENT $content"
+# mark SECTION: when SECTION ended (the Go side turns marks into durations).
+mark() { echo "TIME $1 $(date +%s.%N)"; }
+mark start
 
 # php_files DIR... [TESTS]: the PHP files under DIR (by name: no PHP binary
 # runs here), minus uploads and Composer's generated autoloaders (walked on
@@ -47,14 +50,17 @@ php_files() {
 echo FILES
 # shellcheck disable=SC2086
 php_files "$content" vendor $core -exec sha256sum {} +
+mark release
 # The trailing slash follows a deploy's shared-folder symlink.
 [ -d "$content/uploads/" ] && php_files "$content/uploads/" -exec sha256sum {} +
+mark uploads-php
 # Empty files and "Silence is golden" directory guards under uploads: harmless.
 echo SILENCE
 if [ -d "$content/uploads/" ]; then
 	php_files "$content/uploads/" -empty -exec sha256sum {} +
 	php_files "$content/uploads/" -size -201c ! -empty -exec grep -qis 'silence is golden' {} \; -exec sha256sum {} +
 fi
+mark uploads-silence
 
 # Files the web server may hand out that shouldn't be public: dumps, backups,
 # archives, logs, keys (anywhere in the docroot), and documents and data
@@ -83,6 +89,7 @@ documents() {
 		-o -iname '*.rtf' -o -iname '*.xml' -o -iname '*.json' \) -printf 'DATA %s %T@ %p\n' 2>/dev/null
 }
 risky "$docroot" \( -path "$pre$content/uploads" -o -name node_modules \) -prune -o
+mark docroot-risky
 prune=""
 # shellcheck disable=SC2086 # core is this script's own, no spaces
 for d in "$content/plugins" "$content/themes" "$content/mu-plugins" "$content/languages" "$content/cache" $core vendor; do
@@ -90,8 +97,11 @@ for d in "$content/plugins" "$content/themes" "$content/mu-plugins" "$content/la
 done
 # shellcheck disable=SC2086
 documents "$docroot" \( $prune -path "$pre$content/uploads" -o -name node_modules \) -prune -o
+mark docroot-documents
 if [ -d "$content/uploads/" ]; then
 	risky "$content/uploads/"
+	mark uploads-risky
 	documents "$content/uploads/"
+	mark uploads-documents
 fi
 echo WPDA-END

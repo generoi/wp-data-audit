@@ -1,27 +1,29 @@
-// Package runner is one audit end to end around however the caller reaches
-// the site: Prepare gives the PHP to pipe to `wp eval-file -`, Finish judges
-// its output and saves the snapshot and report, Accept records a person's
-// decision. The CLI and foreman share its config and state, so a flag
-// accepted in one stays accepted in the other.
+// Package runner is one audit end to end, however the caller reaches the
+// site: Run takes a Transport (how to pipe a script to the site's wp-cli and
+// to a shell in its release) and does the rest the same way for every
+// caller: read the checkout, run both scripts and the probes that depend on
+// them as a pipeline, judge, and save to the store the CLI and foreman share.
 package runner
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	audit "github.com/generoi/wp-data-audit"
 	"github.com/generoi/wp-data-audit/geo"
+	"github.com/generoi/wp-data-audit/store"
+	"github.com/generoi/wp-data-audit/web"
 )
 
 // Config is ~/.config/wp-data-audit/config.json: what's true for every site.
@@ -31,48 +33,67 @@ type Config struct {
 	AllowedIPs       []string `json:"allowed_ips"`
 	StaffDomains     []string `json:"staff_domains"`
 	StaffEmails      []string `json:"staff_emails"` // the current staff: a staff-domain account not on it is flagged
-	GeoIP            string   `json:"geoip"` // default geo.DefaultPath()
+	GeoIP            string   `json:"geoip"`        // default geo.DefaultPath()
 }
 
 // LoadConfig reads the config; none is an empty one.
 func LoadConfig() (Config, error) {
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		h, _ := os.UserHomeDir()
+		dir = filepath.Join(h, ".config")
+	}
 	var c Config
-	err := readJSON(filepath.Join(home("XDG_CONFIG_HOME", ".config"), "wp-data-audit", "config.json"), &c)
+	b, err := os.ReadFile(filepath.Join(dir, "wp-data-audit", "config.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return c, nil
 	}
-	return c, err
+	if err != nil {
+		return c, err
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return c, fmt.Errorf("config.json: %w", err)
+	}
+	return c, nil
 }
 
-// Target is one site environment. State is kept per Site and Env; Repo is
-// its checkout at the deployed commit. Deployed is that commit from outside
-// the server (GitHub's last successful deploy run); it wins over a Deployer
-// REVISION file there. Files are only compared when the checkout matches it.
+// Target is one site environment and its checkout, at the deployed commit
+// for the file comparison. Deployed is that commit from outside the server
+// (DeployedCommit); it wins over a Deployer REVISION file there.
 type Target struct {
-	Site, Env, Repo string
-	Deployed        string
-	// Skip are the check groups not to run (audit.ParseGroups); skipping
-	// them also skips their collector sections and probes.
-	Skip map[string]bool
+	Site, Env string
+	Repo      string
+	Deployed  string
 }
 
-// Run is one audit between Prepare and Finish: pipe Script to the site's
-// wp-cli with audit.WPArgs and Hasher to `sh -s` over SSH in the release,
-// then Finish with both outputs.
-type Run struct {
-	Target
-	Script, Hasher string
-	// Client asks the site's public URLs about files that may be exposed
-	// (audit.NewClient when nil). Only candidates are asked: none, no request.
-	Client *http.Client
-	// Context bounds Finish's HTTP probes (a signal cancels them); nil is
-	// context.Background.
-	Context context.Context
-	// Timings are how long each phase took, for -v.
-	Timings []Timing
-	repo    *audit.Repo
-	notes   []string
-	mu      sync.Mutex // Time and Note may be called from the scripts' goroutines
+// Key is the target's place in the store.
+func (t Target) Key() store.Key { return store.Key{Site: t.Site, Env: t.Env} }
+
+// Transport reaches the site. A nil func can't: its source doesn't run, and
+// the checks needing it say so.
+type Transport struct {
+	// Collect pipes the collector script to the site's wp-cli with
+	// audit.WPArgs and returns its output.
+	Collect func(ctx context.Context, script string) ([]byte, error)
+	// Hash pipes audit.Hasher to audit.HasherCommand in the release.
+	Hash func(ctx context.Context, script string) ([]byte, error)
+}
+
+// Options are a run's choices; zero values are the defaults.
+type Options struct {
+	Skip   audit.Skip
+	Client *http.Client  // for the public URLs; web.NewClient when nil
+	Store  *store.Store  // store.Default when nil
+	Config *Config       // LoadConfig when nil
+}
+
+// Result is a run's report (what this run judged; the saved one keeps the
+// last full run's flags for what it didn't) and where its time went.
+type Result struct {
+	Report    audit.Report
+	Timings   []Timing
+	Collector map[string]float64 // seconds per collector section
+	Hasher    map[string]float64 // seconds per hasher section
 }
 
 // Timing is one phase's duration.
@@ -81,150 +102,276 @@ type Timing struct {
 	Took  time.Duration
 }
 
-// Time records how long a phase took since start.
-func (r *Run) Time(phase string, start time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.Timings = append(r.Timings, Timing{phase, time.Since(start)})
+// Run audits t through tr. A signal (ctx ending) stops both scripts and the
+// probes, and nothing is saved.
+func Run(ctx context.Context, t Target, tr Transport, o Options) (Result, error) {
+	r := &run{t: t, tr: tr, o: o, at: time.Now().UTC()}
+	if r.o.Store == nil {
+		s := store.Default()
+		r.o.Store = &s
+	}
+	if r.o.Config == nil {
+		cfg, err := LoadConfig()
+		if err != nil {
+			return Result{}, err
+		}
+		r.o.Config = &cfg
+	}
+	script, err := r.prepare()
+	if err != nil {
+		return Result{}, err
+	}
+	facts := r.gather(ctx, script)
+	if ctx.Err() != nil {
+		return Result{}, fmt.Errorf("stopped: %w (nothing saved)", context.Cause(ctx))
+	}
+	collector, hasher, _ := o.Skip.Needs()
+	if facts.Site == nil && facts.Files == nil && (collector || hasher) {
+		return Result{}, fmt.Errorf("neither the collector nor the hasher ran: %s", r.problems())
+	}
+	rep, err := r.judge(facts)
+	if err != nil {
+		return Result{}, err
+	}
+	res := Result{Report: rep, Timings: r.timings}
+	if facts.Site != nil {
+		res.Collector = facts.Site.Timings
+	}
+	if facts.Files != nil {
+		res.Hasher = facts.Files.Timings
+	}
+	return res, nil
 }
 
-// Prepare reads the repo and builds the script.
-func Prepare(t Target) (*Run, error) {
-	r := &Run{Target: t}
-	start := time.Now()
-	// Only the file comparison needs the install hashed.
-	repo, err := audit.ReadRepo(t.Repo, !t.Skip["files"])
-	r.Time("read and hash the checkout", start)
-	if err != nil {
-		r.notes = append(r.notes, "can't read the repo, so plugins weren't compared and no role counts as public: "+err.Error())
-	} else {
-		r.repo = repo
+// CollectorScript is the collector for t, as Run would pipe it.
+func CollectorScript(t Target, skip audit.Skip) (string, error) {
+	r := &run{t: t, o: Options{Skip: skip}}
+	return r.prepare()
+}
+
+type run struct {
+	t       Target
+	tr      Transport
+	o       Options
+	at      time.Time
+	repo    *audit.Repo
+	mu      sync.Mutex // notes and timings, from the scripts' goroutines
+	notes   []audit.Note
+	timings []Timing
+}
+
+func (r *run) problem(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notes = append(r.notes, audit.Note{Problem: true, Text: fmt.Sprintf(format, args...)})
+}
+
+func (r *run) problems() string {
+	var s []string
+	for _, n := range r.notes {
+		s = append(s, n.Text)
 	}
+	return strings.Join(s, "; ")
+}
+
+func (r *run) time(phase string, start time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.timings = append(r.timings, Timing{phase, time.Since(start)})
+}
+
+// prepare reads the checkout (its install is hashed later, alongside the
+// site's scripts) and builds the collector, leaving out what won't be judged.
+// wordpress.org's checksums are slow and only stand in for comparing with a
+// local install, so they're left out whenever that comparison can run.
+func (r *run) prepare() (string, error) {
+	start := time.Now()
+	repo, err := audit.ReadRepo(r.t.Repo)
+	r.time("read the checkout", start)
+	if err != nil {
+		r.problem("can't read the repo, so plugins weren't compared and no role counts as public: %v", err)
+	}
+	r.repo = repo
 	var roles map[string][]string
 	if repo != nil {
 		roles = repo.PublicRoles
 	}
-	var sections []string
-	for _, s := range []string{"content", "retention"} {
-		if t.Skip[s] {
-			sections = append(sections, s)
-		}
+	var skip []audit.Section
+	if !r.o.Skip.Runs(audit.Content) {
+		skip = append(skip, audit.SectionContent)
 	}
-	// wordpress.org's checksums are slow (one download per plugin) and only
-	// stand in for comparing with a local install of the deployed commit.
-	comparable := repo != nil && repo.Local != nil &&
-		(t.Deployed == "" || strings.HasPrefix(repo.Revision, t.Deployed) || audit.SameFiles(t.Repo, t.Deployed))
-	if t.Skip["files"] || comparable {
-		sections = append(sections, "checksums")
+	if !r.o.Skip.Runs(audit.Retention) {
+		skip = append(skip, audit.SectionRetention)
 	}
-	if r.Script, err = audit.Script(roles, sections...); err != nil {
-		return nil, err
+	if !r.o.Skip.Runs(audit.Files) || repo.Comparable(r.t.Deployed) {
+		skip = append(skip, audit.SectionChecksums)
 	}
-	r.Hasher = audit.Hasher
-	return r, nil
+	return audit.Script(roles, skip...)
 }
 
-// Note adds a line to the report, such as why a script didn't run.
-func (r *Run) Note(s string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.notes = append(r.notes, s)
-}
+// gather reads everything, before the store's lock, as a pipeline of what
+// depends on what: the collector, then the public-site probes (they only
+// need its URLs); the hasher, then the exposed-file probes (its files and the
+// collector's URLs); and the checkout's install hashed meanwhile. A failure
+// is a problem note, and the other sources still count.
+func (r *run) gather(ctx context.Context, script string) audit.Facts {
+	facts := audit.Facts{At: r.at}
+	collector, hasher, _ := r.o.Skip.Needs()
+	var wg sync.WaitGroup
+	var where web.Target // the site's URLs, set before located is closed
+	located := make(chan struct{})
+	var public, exposed *audit.WebFacts
 
-// Finish judges the collector's and hasher's output against the last
-// snapshot, saves the new snapshot and the report, and returns the report.
-// Either may be nil when it didn't run (say why with Note): without the
-// collector only files are judged and the last snapshot stays the baseline.
-func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
-	snap := &audit.Snapshot{Version: 1, GeneratedAt: time.Now().UTC(), NoCollector: true}
-	if out != nil {
-		var err error
-		if snap, err = audit.Parse(out); err != nil {
-			return audit.Report{}, err
+	wg.Go(func() {
+		if collector {
+			facts.Site = r.collect(ctx, script)
 		}
-	}
-	if hashed == nil {
-		// didn't run: the caller noted why
-	} else if rel, err := audit.ParseRelease(hashed); err == nil {
-		if r.Deployed != "" { // GitHub's word over a file on the server an attacker could edit
-			rel.Revision = r.Deployed
-		}
-		snap.Release = rel
-		if r.repo != nil && rel.Revision != "" && !strings.HasPrefix(r.repo.Revision, rel.Revision) && audit.SameFiles(r.Repo, rel.Revision) {
-			r.notes = append(r.notes, fmt.Sprintf("production runs %.12s, the checkout %.12s; nothing deployed changed between them, so files were compared", rel.Revision, r.repo.Revision))
-			r.repo.Revision = rel.Revision
-		}
-	} else {
-		r.notes = append(r.notes, "hasher: "+err.Error())
-	}
-	dir := StateDir(r.Target)
-	// The probes ask the network, so they run before the lock (shared by
-	// every site and by accepts). The last snapshot gives the URLs when the
-	// collector didn't run.
-	home, options := snap.Home, snap.Options
-	if home == "" {
-		if last, err := latest(dir); err == nil && last != nil {
-			home, options = last.Home, last.Options
-		}
-	}
-	ctx := r.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
-	bedrock := true // the fleet's layout, when the hasher didn't say
-	if snap.Release != nil {
-		bedrock = snap.Release.Content == "web/app"
-	}
-	var wg sync.WaitGroup // the two probes are independent
-	if rel := snap.Release; rel != nil && !r.Skip["exposed"] {
-		wg.Go(func() {
+		where = r.where(facts.Site)
+		close(located)
+		if r.o.Skip.Runs(audit.Public) && ctx.Err() == nil {
 			start := time.Now()
-			rel.Exposed = audit.Candidates(rel, r.repo)
-			base := audit.DocrootURL(home)
-			rel.Exposed.Probe(ctx, r.Client, rel, base, audit.BlogURLs(base, options))
-			r.Time("probe exposed files", start)
+			public = web.Probe(ctx, r.o.Client, where, web.Options{Public: true})
+			r.time("public URLs", start)
+		}
+	})
+	if hasher {
+		wg.Go(func() {
+			facts.Files = r.hash(ctx)
+			if facts.Files == nil || !r.o.Skip.Runs(audit.Exposed) {
+				return
+			}
+			<-located
+			if ctx.Err() != nil {
+				return
+			}
+			t := where
+			t.Content = facts.Files.Content
+			var o web.Options
+			cands, _ := audit.Candidates(facts.Files, r.repo)
+			for _, c := range cands {
+				o.Files = append(o.Files, c.Path)
+			}
+			start := time.Now()
+			exposed = web.Probe(ctx, r.o.Client, t, o)
+			r.time("exposed-file URLs", start)
 		})
 	}
-	if sites := audit.SiteURLs(options); len(sites) > 0 && !r.Skip["public"] {
+	if r.o.Skip.Runs(audit.Files) && r.repo != nil && r.repo.Dir != "" {
 		wg.Go(func() {
 			start := time.Now()
-			snap.Public = audit.ProbePublic(ctx, r.Client, sites, bedrock)
-			r.Time("probe public URLs", start)
+			r.repo.HashInstall()
+			r.time("hash the checkout's install", start)
 		})
 	}
 	wg.Wait()
-	if r.Context != nil && r.Context.Err() != nil { // stopped by a signal: save nothing half-judged
-		return audit.Report{}, fmt.Errorf("stopped: %w", context.Cause(r.Context))
-	}
+	facts.Web = merge(exposed, public)
+	return facts
+}
 
-	unlock, err := lock()
+// collect runs the collector; nil when it couldn't.
+func (r *run) collect(ctx context.Context, script string) *audit.SiteFacts {
+	if r.tr.Collect == nil {
+		r.problem("the collector can't reach this site")
+		return nil
+	}
+	start := time.Now()
+	out, err := r.tr.Collect(ctx, script)
+	r.time("collector", start)
+	var s *audit.SiteFacts
+	if err == nil {
+		s, err = audit.ParseSite(out)
+	}
+	if err != nil && ctx.Err() == nil {
+		r.problem("the collector failed: %v", err)
+	}
+	return s
+}
+
+// hash runs the hasher; nil when it couldn't. The deployed commit is GitHub's
+// word over a REVISION file on the server, which an attacker could edit. A
+// checkout a few commits from production still compares when nothing deployed
+// changed between them; that's settled here, as the exposed-file candidates
+// depend on it.
+func (r *run) hash(ctx context.Context) *audit.FileFacts {
+	if r.tr.Hash == nil {
+		r.problem("the hasher can't reach this site")
+		return nil
+	}
+	start := time.Now()
+	out, err := r.tr.Hash(ctx, audit.Hasher)
+	r.time("hasher", start)
+	var f *audit.FileFacts
+	if err == nil {
+		f, err = audit.ParseFiles(out)
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			r.problem("the hasher failed: %v", err)
+		}
+		return nil
+	}
+	if r.t.Deployed != "" {
+		f.Revision = r.t.Deployed
+	}
+	if r.repo != nil && f.Revision != "" && !strings.HasPrefix(r.repo.Revision, f.Revision) && audit.SameFiles(r.t.Repo, f.Revision) {
+		r.mu.Lock()
+		r.notes = append(r.notes, audit.Note{Group: audit.Files, Text: fmt.Sprintf("production runs %.12s, the checkout %.12s; nothing deployed changed between them, so files were compared", f.Revision, r.repo.Revision)})
+		r.mu.Unlock()
+		r.repo.Revision = f.Revision
+	}
+	return f
+}
+
+// where is the site's URLs: the collector's, else the last baseline's.
+func (r *run) where(s *audit.SiteFacts) web.Target {
+	if s != nil {
+		return web.Target{Home: s.Home, Options: s.Options}
+	}
+	if b, err := r.o.Store.Baseline(r.t.Key()); err == nil && b != nil {
+		return web.Target{Home: b.Home, Options: b.Options}
+	}
+	return web.Target{}
+}
+
+// merge joins the two probes' answers; nil when neither ran.
+func merge(a, b *audit.WebFacts) *audit.WebFacts {
+	if a == nil {
+		return b
+	}
+	if b != nil {
+		a.Base = cmp.Or(a.Base, b.Base)
+		maps.Copy(a.Files, b.Files)
+		maps.Copy(a.Listings, b.Listings)
+		a.Sites = append(a.Sites, b.Sites...)
+	}
+	return a
+}
+
+// judge checks the facts and saves under the store's lock: the baseline
+// when the run judged accounts and options, and the report with the last
+// one's flags kept for the groups this run didn't judge.
+func (r *run) judge(facts audit.Facts) (audit.Report, error) {
+	st, k, cfg := *r.o.Store, r.t.Key(), *r.o.Config
+	unlock, err := st.Lock()
 	if err != nil {
 		return audit.Report{}, err
 	}
 	defer unlock()
-	cfg, err := LoadConfig()
+	prev, err := st.Baseline(k)
 	if err != nil {
 		return audit.Report{}, err
 	}
-	prev, err := latest(dir)
+	accepted, err := st.Accepted(k)
 	if err != nil {
 		return audit.Report{}, err
 	}
-	decisions, err := Decisions(r.Target)
-	if err != nil {
+	last, err := st.Report(k)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return audit.Report{}, err
 	}
-	accepted := map[string]bool{}
-	for _, d := range decisions {
-		accepted[d.ID] = true
-	}
-	pending := map[string]string{}
-	if last, err := LastReport(r.Target); err == nil {
-		for _, f := range last.Flags {
-			pending[f.ID] = f.Severity
-		}
+	pending := map[string]audit.Severity{}
+	for _, f := range last.Flags {
+		pending[f.ID] = f.Severity
 	}
 	var g audit.Geo
 	path := cfg.GeoIP
@@ -235,164 +382,22 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 		defer db.Close()
 		g = db
 	}
-	if !snap.NoCollector {
-		audit.CarryLastSeen(prev, snap)
-	}
-	report := audit.Check(prev, snap, audit.Site{
-		Skip:             r.Skip,
-		AllowedCountries: cfg.AllowedCountries,
-		AllowedIPs:       cfg.AllowedIPs,
-		StaffDomains:     cfg.StaffDomains,
-		StaffEmails:      cfg.StaffEmails,
-		Accepted:         accepted,
-		Pending:          pending,
-	}, r.repo, g)
-	report.Notes = append(slices.Clone(r.notes), report.Notes...)
-
-	// The snapshot is the next run's baseline: a run without the collector, or
-	// one that didn't judge accounts or options, would hide what changed
-	// since the last full run (a new admin would never look new).
-	if !snap.NoCollector && !r.Skip["accounts"] && !r.Skip["options"] {
-		stamp := snap.GeneratedAt.UTC().Format("20060102T150405Z")
-		if err := writeJSON(filepath.Join(dir, "snapshots", stamp+".json"), snap); err != nil {
+	res := audit.Check(audit.Input{Facts: facts, Prev: prev, Repo: r.repo, Geo: g, Policy: audit.Policy{
+		AllowedCountries: cfg.AllowedCountries, AllowedIPs: cfg.AllowedIPs,
+		StaffDomains: cfg.StaffDomains, StaffEmails: cfg.StaffEmails,
+		Skip: r.o.Skip, Accepted: accepted, Pending: pending,
+	}})
+	rep := res.Report
+	rep.Notes = append(r.notes, rep.Notes...)
+	if res.Baseline != nil {
+		if err := st.SaveBaseline(k, res.Baseline); err != nil {
 			return audit.Report{}, err
 		}
 	}
-	// A partial run keeps the skipped groups' flags from the last report, so
-	// the saved report (what accept and foreman's page read) stays whole.
-	saved := report
-	if len(r.Skip) > 0 {
-		if last, err := LastReport(r.Target); err == nil {
-			saved.Flags = slices.Clone(report.Flags)
-			for _, f := range last.Flags {
-				if r.Skip[audit.GroupOf(f.Kind)] {
-					saved.Flags = append(saved.Flags, f)
-				}
-			}
-		}
-	}
-	if err := writeJSON(filepath.Join(dir, "report.json"), saved); err != nil {
+	if err := st.SaveReport(k, rep.Merge(last)); err != nil {
 		return audit.Report{}, err
 	}
-	return report, nil
-}
-
-// Decision is an accepted flag and why: the reasons are what the next
-// triage reads, so a site's audits get quieter and better explained.
-type Decision struct {
-	ID     string    `json:"id"`
-	Reason string    `json:"reason"`
-	By     string    `json:"by"`
-	At     time.Time `json:"at"`
-	Flag   string    `json:"flag"` // the message when it was accepted
-}
-
-// Accept records flags from the last report as accepted: they stay quiet
-// until what they describe changes. Only a person decides this; reason is
-// required. everywhere accepts content flags (a script or iframe host, an
-// inline snippet) on every site, since their IDs are the value's hash.
-func Accept(t Target, ids []string, reason, by string, everywhere bool) error {
-	if strings.TrimSpace(reason) == "" {
-		return errors.New("accept: say why (the reason is what the next audit's triage reads)")
-	}
-	unlock, err := lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	last, err := LastReport(t)
-	if err != nil {
-		return fmt.Errorf("no audit to accept from: %w", err)
-	}
-	path := filepath.Join(StateDir(t), "accepted.json")
-	if everywhere {
-		path = everywherePath()
-	}
-	var list []Decision
-	if err := readJSON(path, &list); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	for _, id := range ids {
-		i := slices.IndexFunc(last.Flags, func(f audit.Flag) bool { return f.ID == id })
-		if i < 0 {
-			return fmt.Errorf("%s isn't a flag in the last audit of %s @%s", id, t.Site, t.Env)
-		}
-		if everywhere && !strings.HasPrefix(id, "content:") {
-			return fmt.Errorf("%s: only content flags can be accepted everywhere", id)
-		}
-		list = slices.DeleteFunc(list, func(d Decision) bool { return d.ID == id })
-		list = append(list, Decision{ID: id, Reason: reason, By: by, At: time.Now().UTC(), Flag: last.Flags[i].Message + ": " + last.Flags[i].Untrusted})
-	}
-	slices.SortFunc(list, func(a, b Decision) int { return strings.Compare(a.ID, b.ID) })
-	return writeJSON(path, list)
-}
-
-// Decisions are the target's accepted flags, then the ones accepted everywhere.
-func Decisions(t Target) ([]Decision, error) {
-	var all []Decision
-	for _, path := range []string{filepath.Join(StateDir(t), "accepted.json"), everywherePath()} {
-		var list []Decision
-		if err := readJSON(path, &list); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		all = append(all, list...)
-	}
-	return all, nil
-}
-
-// lock serialises every write to the state (audits finishing, accepts from
-// the CLI and from foreman's page), so no decision is lost to a race.
-func lock() (func(), error) {
-	path := filepath.Join(home("XDG_STATE_HOME", ".local/state"), "wp-data-audit", ".lock")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, err
-	}
-	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
-}
-
-func everywherePath() string {
-	return filepath.Join(home("XDG_STATE_HOME", ".local/state"), "wp-data-audit", "accepted-everywhere.json")
-}
-
-// Text is the report for people: one block per flag, site data quoted.
-func Text(target string, r audit.Report) string {
-	var b strings.Builder
-	urgent := r.Urgent()
-	fmt.Fprintf(&b, "%s: %d urgent, %d to review\n", target, urgent, len(r.Flags)-urgent)
-	for _, f := range r.Flags {
-		fmt.Fprintf(&b, "\n%-7s %s\n        %s\n", strings.ToUpper(f.Severity), f.ID, f.Message)
-		if f.Untrusted != "" {
-			fmt.Fprintf(&b, "        site data: %q\n", f.Untrusted)
-		}
-	}
-	if len(r.Notes) > 0 {
-		b.WriteString("\nnotes:\n")
-		for _, n := range r.Notes {
-			b.WriteString("- " + n + "\n")
-		}
-	}
-	return b.String()
-}
-
-// LastReport is the report of the last audit.
-func LastReport(t Target) (audit.Report, error) {
-	var r audit.Report
-	err := readJSON(filepath.Join(StateDir(t), "report.json"), &r)
-	return r, err
-}
-
-// StateDir is where a target's snapshots, report and accepted flags live,
-// owner-only: they hold staff emails and login IPs.
-func StateDir(t Target) string {
-	return filepath.Join(home("XDG_STATE_HOME", ".local/state"), "wp-data-audit", t.Site, t.Env)
+	return rep, nil
 }
 
 // DeployedCommit is the commit of the checkout's repo's last successful
@@ -425,52 +430,4 @@ func SiteName(repo string) string {
 	}
 	abs, _ := filepath.Abs(repo)
 	return filepath.Base(abs)
-}
-
-// latest is the newest saved snapshot, nil before the first audit.
-func latest(dir string) (*audit.Snapshot, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "snapshots", "*.json"))
-	if err != nil || len(files) == 0 {
-		return nil, err
-	}
-	slices.Sort(files)
-	var s audit.Snapshot
-	if err := readJSON(files[len(files)-1], &s); err != nil {
-		return nil, err
-	}
-	return &s, nil
-}
-
-func home(env, rel string) string {
-	if d := os.Getenv(env); d != "" {
-		return d
-	}
-	h, _ := os.UserHomeDir()
-	return filepath.Join(h, rel)
-}
-
-func readJSON(path string, v any) error {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(b, v); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	return nil
-}
-
-func writeJSON(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := fmt.Sprintf("%s.%d.tmp", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }

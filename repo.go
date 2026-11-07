@@ -28,13 +28,63 @@ const ContentDir = "web/app"
 // of its own, not composer.json: Composer's lock hash covers `extra`.
 const SettingsFile = "data-audit.json"
 
+// Repo is what the site's repo says: what it deploys (plugin, mu-plugin and
+// drop-in names, and what carries a patch, whose checksums are expected to
+// fail) and its SettingsFile: the roles anyone can get per site and the
+// client's email domains.
+type Repo struct {
+	Plugins, MuPlugins, Dropins map[string]bool
+	PatchedPlugins              map[string]bool
+	PatchedCore                 bool
+	PublicRoles                 map[string][]string
+	ClientDomains               []string
+	// Revision is the checkout's commit; Local its composer install's PHP
+	// files hashed like the server's (nil, with LocalWhy, when there's none).
+	Revision string
+	Local    map[string]string
+	LocalWhy string
+	// Dir is the checkout when it has a composer install (Has).
+	Dir string
+}
+
+// Has reports whether the checkout's install has a file at path p (from the
+// root): a data file it has is the release's own (a plugin's sample CSV).
+func (r *Repo) Has(p string) bool {
+	if r == nil || r.Dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(r.Dir, filepath.FromSlash(p)))
+	return err == nil
+}
+
+// Comparable reports whether the release can be compared with the local
+// install: there is one, at the deployed commit or at one that installs the
+// same files.
+func (r *Repo) Comparable(deployed string) bool {
+	return r != nil && r.Dir != "" &&
+		(deployed == "" || strings.HasPrefix(r.Revision, deployed) || SameFiles(r.Dir, deployed))
+}
+
+// HashInstall hashes the composer install's PHP files like the server's, for
+// the release comparison (Local). It's the slow part of reading a checkout,
+// so it's separate: a run hashes while the site's scripts run, and one that
+// skips the file checks doesn't hash at all.
+func (r *Repo) HashInstall() {
+	if r == nil || r.Dir == "" {
+		return
+	}
+	var err error
+	if r.Local, err = hashTree(r.Dir); err != nil {
+		r.Local, r.LocalWhy = nil, "hashing the checkout: "+err.Error()
+	}
+}
+
 // ReadRepo reads a Bedrock checkout: what it deploys (Composer packages by
 // their installer path, plus what git tracks under web/app) and its
 // SettingsFile. The checkout should be at the deployed commit: a branch that
-// adds or drops a plugin shows up as a flag. hashFiles hashes the composer
-// install's PHP files for the release comparison (Local); without it a run
-// that skips the file checks doesn't pay for that.
-func ReadRepo(dir string, hashFiles bool) (*Repo, error) {
+// adds or drops a plugin shows up as a flag. Local stays nil until
+// HashInstall.
+func ReadRepo(dir string) (*Repo, error) {
 	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}}
 
 	var cj struct {
@@ -123,10 +173,8 @@ func ReadRepo(dir string, hashFiles bool) (*Repo, error) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "vendor", "composer", "installed.json")); err != nil {
 		exp.LocalWhy = "the checkout has no composer install"
-	} else if exp.Dir = dir; !hashFiles {
-		exp.LocalWhy = "file checks skipped"
-	} else if exp.Local, err = hashTree(dir); err != nil {
-		exp.Local, exp.LocalWhy = nil, "hashing the checkout: "+err.Error()
+	} else {
+		exp.Dir, exp.LocalWhy = dir, "the checkout's install wasn't hashed"
 	}
 
 	out, err := exec.Command("git", "-C", dir, "ls-files", "-z", "--", ContentDir).Output()
