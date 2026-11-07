@@ -50,6 +50,45 @@ type Repo struct {
 	LocalWhy string
 	// Dir is the checkout when it has a composer install (Has).
 	Dir string
+	// Tracked are the files git tracks at TrackedAt, the deployed commit,
+	// when the checkout is at another one (LoadTracked): what the release
+	// ships from the repo itself, whatever the working tree holds.
+	Tracked   map[string]bool
+	TrackedAt string
+	dir       string // the checkout, install or not
+}
+
+// LoadTracked reads the files git tracks at commit rev (one ls-tree), for a
+// checkout that isn't at it, else GitHub's tree of that commit (gh, read
+// only) when the checkout hasn't fetched it. Neither leaves Tracked nil:
+// nothing is fetched into the checkout.
+func (r *Repo) LoadTracked(rev string) {
+	if r == nil || r.dir == "" || rev == "" {
+		return
+	}
+	var paths []string
+	if out, err := exec.Command("git", "-C", r.dir, "ls-tree", "-r", "-z", "--name-only", rev+"^{commit}").Output(); err == nil {
+		paths = strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	} else {
+		// {owner}/{repo} is the checkout's own, by gh. The first line says
+		// whether GitHub cut the tree short; then one path per line.
+		cmd := exec.Command("gh", "api", "repos/{owner}/{repo}/git/trees/"+rev+"?recursive=1",
+			"--jq", `.truncated, (.tree[] | select(.type == "blob") | .path)`)
+		cmd.Dir = r.dir
+		out, err := cmd.Output()
+		if err != nil {
+			return
+		}
+		lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+		if len(lines) == 0 || lines[0] != "false" {
+			return
+		}
+		paths = lines[1:]
+	}
+	r.Tracked, r.TrackedAt = make(map[string]bool, len(paths)), rev
+	for _, p := range paths {
+		r.Tracked[p] = true
+	}
 }
 
 // Has reports whether the checkout's install has a file at path p (from the
@@ -90,7 +129,7 @@ func (r *Repo) HashInstall() {
 // adds or drops a plugin shows up as a flag. Local stays nil until
 // HashInstall.
 func ReadRepo(dir string) (*Repo, error) {
-	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}}
+	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}, dir: dir}
 
 	var cj struct {
 		Extra struct {

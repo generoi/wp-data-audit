@@ -79,15 +79,21 @@ func dataType(p string) string {
 // Candidates are the hasher's data files worth asking the public URL about:
 // anything risky by type, and documents outside the media library (or in it
 // under a name that suggests people's data). Files the checkout's install
-// has at the same path are the release's own. notes say what was only
-// counted. Pure and deterministic: the probes ask about these paths, and
-// the exposed check joins their answers back to them.
+// has at the same path are the release's own; with a checkout at another
+// commit, the files git tracks at the deployed one are (Repo.Tracked), and
+// what Composer installs (plugins, vendor) is only counted. notes say what
+// was only counted. Pure and deterministic: the probes ask about these
+// paths, and the exposed check joins their answers back to them.
 func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 	if f == nil {
 		return nil, nil
 	}
 	uploads := f.Content + "/uploads/"
 	compare := repo != nil && repo.Dir != "" && !stale(f, repo)
+	var tracked map[string]bool
+	if repo != nil && !compare && repo.TrackedAt != "" && f.Revision != "" && strings.HasPrefix(repo.TrackedAt, f.Revision) {
+		tracked = repo.Tracked
+	}
 	var media, forms, unchecked, public, jsons int
 	var oldestForm int64
 	for _, d := range f.Data {
@@ -101,6 +107,8 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 				if repo.Has(p) {
 					continue
 				}
+			} else if tracked[p] {
+				continue
 			} else if shipped(p, f.Content) {
 				unchecked++
 				continue

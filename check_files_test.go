@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -335,5 +336,60 @@ func TestReadRepo(t *testing.T) {
 	}
 	if len(repo.Revision) != 40 || !repo.Comparable(repo.Revision[:12]) || !repo.Has("web/app/plugins/woocommerce/sample-data/x.csv") || repo.Has("web/app/nope.csv") {
 		t.Errorf("revision %q, comparable/has wrong", repo.Revision)
+	}
+}
+
+// A checkout at another commit than production: what production's commit
+// tracks is the release's own (not what the working tree has), Composer's
+// folders are only counted, and anything else is a candidate.
+func TestCandidatesAtDeployedCommit(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	os.MkdirAll(filepath.Join(dir, "web/app/acf-json"), 0o755)
+	os.WriteFile(filepath.Join(dir, "composer.json"), []byte(`{}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "composer.lock"), []byte(`{"packages":[]}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "web/app/acf-json/group_1.json"), []byte(`{}`), 0o644)
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "deployed")
+	deployed := git("rev-parse", "HEAD")
+	git("rm", "-q", "web/app/acf-json/group_1.json") // the checkout moved on: the file is gone from it
+	git("commit", "-q", "-m", "later")
+
+	repo, err := ReadRepo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &FileFacts{Content: "web/app", Revision: deployed[:12], Data: []DataFile{
+		{Path: "web/app/acf-json/group_1.json"},
+		{Path: "web/app/plugins/p/sample.csv"},
+		{Path: "web/app/export.csv"},
+	}}
+	cands := func() (paths []string) {
+		c, _ := Candidates(f, repo)
+		for _, x := range c {
+			paths = append(paths, x.Path)
+		}
+		return paths
+	}
+	if got := cands(); !slices.Contains(got, "web/app/acf-json/group_1.json") {
+		t.Fatalf("without git's list a stale checkout can't vouch for a file: %v", got)
+	}
+	repo.LoadTracked(deployed[:12])
+	if got := cands(); len(got) != 1 || got[0] != "web/app/export.csv" {
+		t.Fatalf("candidates %v, want only the untracked export", got)
+	}
+	// A commit git doesn't have and with no GitHub remote: nothing loaded
+	// (the temp repo has no origin, so gh can't resolve it either).
+	repo.LoadTracked("0123456789ab")
+	if repo.TrackedAt == "0123456789ab" {
+		t.Fatal("loaded a commit git doesn't have")
 	}
 }

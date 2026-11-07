@@ -360,6 +360,18 @@ func (r *run) hash(ctx context.Context) *audit.FileFacts {
 		r.mu.Unlock()
 		r.repo.Revision = f.Revision
 	}
+	// Still another commit: which files the release ships from the repo
+	// itself comes from git at production's commit, not the working tree.
+	if r.repo != nil && f.Revision != "" && r.repo.Revision != "" && !strings.HasPrefix(r.repo.Revision, f.Revision) {
+		r.repo.LoadTracked(f.Revision)
+		text := fmt.Sprintf("the checkout isn't at production's %.12s and neither git nor GitHub gave that commit's files, so files the repo ships may be flagged as exposed", f.Revision)
+		if r.repo.Tracked != nil {
+			text = fmt.Sprintf("exposed files compared with what the repo tracks at production's %.12s (the checkout is at %.12s)", f.Revision, r.repo.Revision)
+		}
+		r.mu.Lock()
+		r.notes = append(r.notes, audit.Note{Group: audit.Exposed, Text: text})
+		r.mu.Unlock()
+	}
 	return f
 }
 
