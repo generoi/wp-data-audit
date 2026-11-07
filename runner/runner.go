@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -50,6 +51,9 @@ func LoadConfig() (Config, error) {
 type Target struct {
 	Site, Env, Repo string
 	Deployed        string
+	// Skip are the check groups not to run (audit.ParseGroups); skipping
+	// them also skips their collector sections and probes.
+	Skip map[string]bool
 }
 
 // Run is one audit between Prepare and Finish: pipe Script to the site's
@@ -61,14 +65,35 @@ type Run struct {
 	// Client asks the site's public URLs about files that may be exposed
 	// (audit.NewClient when nil). Only candidates are asked: none, no request.
 	Client *http.Client
-	repo   *audit.Repo
-	notes          []string
+	// Context bounds Finish's HTTP probes (a signal cancels them); nil is
+	// context.Background.
+	Context context.Context
+	// Timings are how long each phase took, for -v.
+	Timings []Timing
+	repo    *audit.Repo
+	notes   []string
+	mu      sync.Mutex // Time and Note may be called from the scripts' goroutines
+}
+
+// Timing is one phase's duration.
+type Timing struct {
+	Phase string
+	Took  time.Duration
+}
+
+// Time records how long a phase took since start.
+func (r *Run) Time(phase string, start time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Timings = append(r.Timings, Timing{phase, time.Since(start)})
 }
 
 // Prepare reads the repo and builds the script.
 func Prepare(t Target) (*Run, error) {
 	r := &Run{Target: t}
+	start := time.Now()
 	repo, err := audit.ReadRepo(t.Repo)
+	r.Time("read and hash the checkout", start)
 	if err != nil {
 		r.notes = append(r.notes, "can't read the repo, so plugins weren't compared and no role counts as public: "+err.Error())
 	} else {
@@ -78,7 +103,20 @@ func Prepare(t Target) (*Run, error) {
 	if repo != nil {
 		roles = repo.PublicRoles
 	}
-	if r.Script, err = audit.Script(roles); err != nil {
+	var sections []string
+	for _, s := range []string{"content", "retention"} {
+		if t.Skip[s] {
+			sections = append(sections, s)
+		}
+	}
+	// wordpress.org's checksums are slow (one download per plugin) and only
+	// stand in for comparing with a local install of the deployed commit.
+	comparable := repo != nil && repo.Local != nil &&
+		(t.Deployed == "" || strings.HasPrefix(repo.Revision, t.Deployed) || audit.SameFiles(t.Repo, t.Deployed))
+	if t.Skip["files"] || comparable {
+		sections = append(sections, "checksums")
+	}
+	if r.Script, err = audit.Script(roles, sections...); err != nil {
 		return nil, err
 	}
 	r.Hasher = audit.Hasher
@@ -86,7 +124,11 @@ func Prepare(t Target) (*Run, error) {
 }
 
 // Note adds a line to the report, such as why a script didn't run.
-func (r *Run) Note(s string) { r.notes = append(r.notes, s) }
+func (r *Run) Note(s string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notes = append(r.notes, s)
+}
 
 // Finish judges the collector's and hasher's output against the last
 // snapshot, saves the new snapshot and the report, and returns the report.
@@ -114,6 +156,48 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 	} else {
 		r.notes = append(r.notes, "hasher: "+err.Error())
 	}
+	dir := StateDir(r.Target)
+	// The probes ask the network, so they run before the lock (shared by
+	// every site and by accepts). The last snapshot gives the URLs when the
+	// collector didn't run.
+	home, options := snap.Home, snap.Options
+	if home == "" {
+		if last, err := latest(dir); err == nil && last != nil {
+			home, options = last.Home, last.Options
+		}
+	}
+	ctx := r.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	bedrock := true // the fleet's layout, when the hasher didn't say
+	if snap.Release != nil {
+		bedrock = snap.Release.Content == "web/app"
+	}
+	var wg sync.WaitGroup // the two probes are independent
+	if rel := snap.Release; rel != nil && !r.Skip["exposed"] {
+		wg.Go(func() {
+			start := time.Now()
+			rel.Exposed = audit.Candidates(rel, r.repo)
+			base := audit.DocrootURL(home)
+			rel.Exposed.Probe(ctx, r.Client, rel, base, audit.BlogURLs(base, options))
+			r.Time("probe exposed files", start)
+		})
+	}
+	if sites := audit.SiteURLs(options); len(sites) > 0 && !r.Skip["public"] {
+		wg.Go(func() {
+			start := time.Now()
+			snap.Public = audit.ProbePublic(ctx, r.Client, sites, bedrock)
+			r.Time("probe public URLs", start)
+		})
+	}
+	wg.Wait()
+	if r.Context != nil && r.Context.Err() != nil { // stopped by a signal: save nothing half-judged
+		return audit.Report{}, fmt.Errorf("stopped: %w", context.Cause(r.Context))
+	}
+
 	unlock, err := lock()
 	if err != nil {
 		return audit.Report{}, err
@@ -123,7 +207,6 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 	if err != nil {
 		return audit.Report{}, err
 	}
-	dir := StateDir(r.Target)
 	prev, err := latest(dir)
 	if err != nil {
 		return audit.Report{}, err
@@ -154,23 +237,8 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 	if !snap.NoCollector {
 		audit.CarryLastSeen(prev, snap)
 	}
-	home, options := snap.Home, snap.Options
-	if home == "" && prev != nil { // the collector didn't run: last month's URLs
-		home, options = prev.Home, prev.Options
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	bedrock := true // the fleet's layout, when the hasher didn't say
-	if rel := snap.Release; rel != nil {
-		bedrock = rel.Content == "web/app"
-		rel.Exposed = audit.Candidates(rel, r.repo)
-		base := audit.DocrootURL(home)
-		rel.Exposed.Probe(ctx, r.Client, rel, base, audit.BlogURLs(base, options))
-	}
-	if sites := audit.SiteURLs(options); len(sites) > 0 {
-		snap.Public = audit.ProbePublic(ctx, r.Client, sites, bedrock)
-	}
 	report := audit.Check(prev, snap, audit.Site{
+		Skip:             r.Skip,
 		AllowedCountries: cfg.AllowedCountries,
 		AllowedIPs:       cfg.AllowedIPs,
 		StaffDomains:     cfg.StaffDomains,
@@ -180,13 +248,29 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 	}, r.repo, g)
 	report.Notes = append(slices.Clone(r.notes), report.Notes...)
 
-	if !snap.NoCollector { // a partial run would make every account look new next time
+	// The snapshot is the next run's baseline: a run without the collector, or
+	// one that didn't judge accounts or options, would hide what changed
+	// since the last full run (a new admin would never look new).
+	if !snap.NoCollector && !r.Skip["accounts"] && !r.Skip["options"] {
 		stamp := snap.GeneratedAt.UTC().Format("20060102T150405Z")
 		if err := writeJSON(filepath.Join(dir, "snapshots", stamp+".json"), snap); err != nil {
 			return audit.Report{}, err
 		}
 	}
-	if err := writeJSON(filepath.Join(dir, "report.json"), report); err != nil {
+	// A partial run keeps the skipped groups' flags from the last report, so
+	// the saved report (what accept and foreman's page read) stays whole.
+	saved := report
+	if len(r.Skip) > 0 {
+		if last, err := LastReport(r.Target); err == nil {
+			saved.Flags = slices.Clone(report.Flags)
+			for _, f := range last.Flags {
+				if r.Skip[audit.GroupOf(f.Kind)] {
+					saved.Flags = append(saved.Flags, f)
+				}
+			}
+		}
+	}
+	if err := writeJSON(filepath.Join(dir, "report.json"), saved); err != nil {
 		return audit.Report{}, err
 	}
 	return report, nil

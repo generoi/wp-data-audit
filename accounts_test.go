@@ -6,6 +6,21 @@ import (
 	"time"
 )
 
+func TestParseGroups(t *testing.T) {
+	s, err := ParseGroups("files,exposed", "exposed")
+	if err != nil || s["files"] || !s["exposed"] || !s["accounts"] || NeedsCollector(s) || !NeedsHasher(s) {
+		t.Fatalf("%v %v", s, err)
+	}
+	if _, err := ParseGroups("", "users"); err == nil {
+		t.Fatal("an unknown group parsed")
+	}
+	for _, k := range []string{"user", "dormant", "option", "release", "exposed", "public", "retention", "content"} {
+		if GroupOf(k) == "" {
+			t.Errorf("kind %s has no group", k)
+		}
+	}
+}
+
 func TestDormantAndLeavers(t *testing.T) {
 	now := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
 	ago := func(d int) int64 { return now.AddDate(0, 0, -d).Unix() }

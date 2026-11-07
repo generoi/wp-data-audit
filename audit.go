@@ -50,9 +50,18 @@ var (
 // their users are only counted. `customer` is public wherever WooCommerce
 // runs; every other role is listed, so a subscriber on a site without
 // sign-ups gets flagged.
-func Script(publicRoles map[string][]string) (string, error) {
+//
+// sections are collector sections not to run: content, retention, checksums.
+func Script(publicRoles map[string][]string, sections ...string) (string, error) {
 	var b strings.Builder
-	b.WriteString("<?php\n$wpda_public_roles = [")
+	b.WriteString("<?php\n$wpda_skip = [")
+	for _, s := range sections {
+		if s != "content" && s != "retention" && s != "checksums" {
+			return "", fmt.Errorf("collector section %q: want content, retention or checksums", s)
+		}
+		fmt.Fprintf(&b, "'%s' => true, ", s)
+	}
+	b.WriteString("];\n$wpda_public_roles = [")
 	for _, site := range slices.Sorted(maps.Keys(publicRoles)) {
 		if !siteRE.MatchString(site) {
 			return "", fmt.Errorf("public roles: site %q: want a host or blog id", site)
@@ -195,6 +204,7 @@ type Snapshot struct {
 	ContentTruncated bool              `json:"content_truncated"`
 	Checksums        Checksums         `json:"checksums"`
 	Retention        Retention         `json:"retention"`
+	Timings          map[string]float64 `json:"timings,omitempty"` // seconds per collector section
 	Errors           []string          `json:"errors"`
 	// Release is the hasher's file list, joined in by the caller (runner);
 	// nil when it didn't run.
@@ -322,6 +332,7 @@ type Checksums struct {
 	Core           []string         `json:"core"`
 	Plugins        []PluginChecksum `json:"plugins"`
 	PluginsSkipped int              `json:"plugins_skipped"`
+	Skipped        bool             `json:"skipped"` // not run: a local install was there to compare with
 }
 
 type PluginChecksum struct {

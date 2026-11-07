@@ -10,12 +10,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	audit "github.com/generoi/wp-data-audit"
 	"github.com/generoi/wp-data-audit/geo"
@@ -23,8 +29,14 @@ import (
 )
 
 const usage = `usage:
-  wp-data-audit [--env production] [--wp CMD] [--repo DIR] [--json]
-      audit the site, save a snapshot, print the flags (exit 1 if any)
+  wp-data-audit [--env production] [--wp CMD] [--repo DIR] [--only|--skip CHECKS] [--json] [-v]
+      audit the site, save a snapshot, print the flags (exit 1 if any).
+      CHECKS: accounts, options, files, exposed, public, retention, content
+      (comma-separated); skipping one also skips its remote work.
+      --collector FILE, --hasher FILE: judge saved outputs (- for stdin)
+  wp-data-audit script collector|hasher [--repo DIR] [--only|--skip CHECKS]
+      print a script, to pipe to a site by hand:
+      wp-data-audit script hasher | ssh host 'cd /site && sh -s' > hashed.txt
   wp-data-audit accept --reason WHY [--everywhere] [--env production] [--repo DIR] ID...
       accept flags from the last audit; they stay quiet until what they describe changes.
       --everywhere: content flags (a script or iframe host) on every site
@@ -67,6 +79,8 @@ func run(args []string) error {
 			}
 			by := os.Getenv("USER")
 			return runner.Accept(t(), fs.Args(), *reason, by, *everywhere)
+		case "script":
+			return printScript(args[1:])
 		case "geoip-update":
 			path := geo.DefaultPath()
 			if err := geo.Update(context.Background(), path); err != nil {
@@ -91,51 +105,144 @@ func flags(name string) (*flag.FlagSet, func() runner.Target) {
 	return fs, func() runner.Target { return runner.Target{Site: runner.SiteName(*repo), Env: *env, Repo: *repo} }
 }
 
-func auditSite(args []string) error {
-	fs, target := flags("wp-data-audit")
-	wp := fs.String("wp", "", "wp-cli command instead of vendor/bin/wp @<env>")
-	shell := fs.String("sh", "", "command running a shell script from stdin on the site, instead of ssh to the alias's host (e.g. \"ddev exec sh -s\")")
-	asJSON := fs.Bool("json", false, "print the report as JSON")
-	if err := fs.Parse(args); err != nil {
+// checkFlags are the flags that choose what runs, shared by the audit and
+// `script`.
+func checkFlags(fs *flag.FlagSet) func() (map[string]bool, error) {
+	only := fs.String("only", "", "run only these checks (comma-separated): "+strings.Join(audit.Groups, ", "))
+	skip := fs.String("skip", "", "skip these checks (comma-separated)")
+	return func() (map[string]bool, error) { return audit.ParseGroups(*only, *skip) }
+}
+
+// printScript is `script collector|hasher`: the script to pipe to a site by
+// hand, e.g. `wp-data-audit script collector | ssh host wp eval-file -`.
+func printScript(args []string) error {
+	if len(args) == 0 || (args[0] != "collector" && args[0] != "hasher") {
+		return errors.New("script: collector or hasher?")
+	}
+	fs, target := flags("script")
+	groups := checkFlags(fs)
+	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
+	if args[0] == "hasher" {
+		fmt.Print(audit.Hasher)
+		return nil
+	}
 	t := target()
-	if t.Env == "production" {
-		t.Deployed = runner.DeployedCommit(t.Repo)
+	var err error
+	if t.Skip, err = groups(); err != nil {
+		return err
 	}
 	r, err := runner.Prepare(t)
 	if err != nil {
 		return err
 	}
+	fmt.Print(r.Script)
+	return nil
+}
+
+func auditSite(args []string) error {
+	fs, target := flags("wp-data-audit")
+	groups := checkFlags(fs)
+	wp := fs.String("wp", "", "wp-cli command instead of vendor/bin/wp @<env>")
+	shell := fs.String("sh", "", "command running a shell script from stdin on the site, instead of ssh to the alias's host (e.g. \"ddev exec sh -s\")")
+	collectorIn := fs.String("collector", "", "judge this saved collector output instead of running it (- for stdin)")
+	hasherIn := fs.String("hasher", "", "judge this saved hasher output instead of running it (- for stdin)")
+	asJSON := fs.Bool("json", false, "print the report as JSON")
+	verbose := fs.Bool("v", false, "print each phase's duration to stderr")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *collectorIn == "-" && *hasherIn == "-" {
+		return errors.New("only one of --collector and --hasher can read stdin")
+	}
+	t := target()
+	var err error
+	if t.Skip, err = groups(); err != nil {
+		return err
+	}
+	if t.Env == "production" {
+		t.Deployed = runner.DeployedCommit(t.Repo)
+	}
+	// SIGINT, SIGTERM and SIGHUP stop the remote scripts and save nothing:
+	// the last snapshot stays the baseline.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	r, err := runner.Prepare(t)
+	if err != nil {
+		return err
+	}
+	r.Context = ctx
 	base := []string{"vendor/bin/wp", "@" + t.Env}
 	if *wp != "" {
 		base = strings.Fields(*wp)
 	}
-	out, err := runWP(t.Repo, append(slices.Clone(base), audit.WPArgs...), r.Script)
-	if err != nil { // the hasher needs no wp-cli: the files are still checked
-		fmt.Fprintln(os.Stderr, "wp-data-audit: collector:", err)
-		r.Note("the collector failed (" + err.Error() + "); the site's wp-cli may run the wrong PHP: set bin_path for the alias in wp-cli.yml to the folder of the right php (php_path only works where the release's vendor/bin/wp can execute)")
-		out = nil
-	}
 	// The hasher runs the server's own sh, find and sha256sum, never the
 	// site's wp-cli: over ssh to the alias's host unless told otherwise.
 	sh := strings.Fields(*shell)
-	if len(sh) == 0 && *wp == "" {
+	if len(sh) == 0 && *wp == "" && *hasherIn == "" && audit.NeedsHasher(t.Skip) {
 		if sh, err = aliasSSH(t.Repo, t.Env); err != nil {
 			fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err)
 		}
 	}
-	var hashed []byte
-	if len(sh) > 0 {
-		if hashed, err = runWP(t.Repo, sh, r.Hasher); err != nil {
-			fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err) // a note in the report; the rest still counts
-			r.Note("the hasher failed: " + err.Error())
-		}
+
+	// The two scripts are independent: run them side by side.
+	var out, hashed []byte
+	var wg sync.WaitGroup
+	if audit.NeedsCollector(t.Skip) {
+		wg.Go(func() {
+			start := time.Now()
+			var err error
+			if *collectorIn != "" {
+				out, err = readInput(*collectorIn)
+			} else {
+				out, err = runWP(ctx, t.Repo, append(slices.Clone(base), audit.WPArgs...), r.Script)
+			}
+			r.Time("collector", start)
+			if err != nil && ctx.Err() == nil { // the hasher needs no wp-cli: the files are still checked
+				fmt.Fprintln(os.Stderr, "wp-data-audit: collector:", err)
+				r.Note("the collector failed (" + err.Error() + "); the site's wp-cli may run the wrong PHP: set bin_path for the alias in wp-cli.yml to the folder of the right php (php_path only works where the release's vendor/bin/wp can execute)")
+				out = nil
+			}
+		})
 	}
-	if out == nil && hashed == nil {
+	if audit.NeedsHasher(t.Skip) && (len(sh) > 0 || *hasherIn != "") {
+		wg.Go(func() {
+			start := time.Now()
+			var err error
+			if *hasherIn != "" {
+				hashed, err = readInput(*hasherIn)
+			} else {
+				hashed, err = runWP(ctx, t.Repo, sh, r.Hasher)
+			}
+			r.Time("hasher", start)
+			if err != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err) // a note in the report; the rest still counts
+				r.Note("the hasher failed: " + err.Error())
+				hashed = nil
+			}
+		})
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return fmt.Errorf("stopped by a signal: nothing saved")
+	}
+	if out == nil && hashed == nil && (audit.NeedsCollector(t.Skip) || audit.NeedsHasher(t.Skip)) {
 		return errors.New("neither the collector nor the hasher ran")
 	}
+	start := time.Now()
 	report, err := r.Finish(out, hashed)
+	r.Time("finish (probes, judge, save)", start)
+	if *verbose {
+		for _, tm := range r.Timings {
+			fmt.Fprintf(os.Stderr, "%8.1fs  %s\n", tm.Took.Seconds(), tm.Phase)
+		}
+		if snap, err := audit.Parse(out); err == nil && out != nil {
+			for _, s := range slices.Sorted(maps.Keys(snap.Timings)) {
+				fmt.Fprintf(os.Stderr, "%8.1fs    collector: %s\n", snap.Timings[s], s)
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -192,9 +299,21 @@ func aliasSSH(repo, env string) ([]string, error) {
 	return nil, fmt.Errorf("wp-cli.yml has no ssh for @%s", env)
 }
 
-// runWP pipes script to argv in dir and returns its stdout.
-func runWP(dir string, argv []string, script string) ([]byte, error) {
-	cmd := exec.Command(argv[0], argv[1:]...)
+// readInput is a saved script output: a file, or stdin for "-".
+func readInput(path string) ([]byte, error) {
+	if path == "-" {
+		return io.ReadAll(os.Stdin)
+	}
+	return os.ReadFile(path)
+}
+
+// runWP pipes script to argv in dir and returns its stdout. When ctx ends (a
+// signal) the command gets SIGTERM, then SIGKILL after ten seconds: ssh then
+// closes the session and the remote script ends with it.
+func runWP(ctx context.Context, dir string, argv []string, script string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 10 * time.Second
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(script)
 	var out bytes.Buffer

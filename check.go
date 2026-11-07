@@ -55,6 +55,7 @@ type Site struct {
 	AllowedIPs       []string        // IPs or CIDR ranges never flagged, whatever their country
 	StaffDomains     []string        // email domains of the people who run the site
 	StaffEmails      []string        // the current staff's addresses; empty skips the leaver check
+	Skip             map[string]bool // check groups not to run (Groups)
 	Accepted         map[string]bool // flag IDs a person accepted
 	// Pending are the last report's flags, ID → severity. A change caught by
 	// comparing with the previous snapshot (an option's new value, a new
@@ -118,24 +119,36 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 	if exp != nil {
 		clients = exp.ClientDomains
 	}
+	run := func(group string, check func()) {
+		if !site.Skip[group] {
+			check()
+		}
+	}
+	files := func() {
+		if !c.files(cur, exp) && !cur.NoCollector { // compared with the deployed commit: wordpress.org's checksums add nothing
+			c.checksums(cur, exp)
+		}
+	}
 	if cur.NoCollector {
-		c.note("the collector didn't run, so accounts, options and content weren't checked: only files")
-		c.files(cur, exp)
-		c.exposed(cur)
-		c.public(cur)
+		if NeedsCollector(site.Skip) {
+			c.note("the collector didn't run, so accounts, options and content weren't checked: only files")
+		}
+		run("files", files)
+		run("exposed", func() { c.exposed(cur) })
+		run("public", func() { c.public(cur) })
 		return c.sorted()
 	}
-	c.registration(cur)
-	c.users(prev, cur, clients, geo)
-	c.wooKeys(prev, cur)
-	c.options(prev, cur)
-	if !c.files(cur, exp) { // compared with the deployed commit: wordpress.org's checksums add nothing
-		c.checksums(cur, exp)
-	}
-	c.exposed(cur)
-	c.public(cur)
-	c.retention(cur)
-	c.content(cur)
+	run("accounts", func() {
+		c.registration(cur)
+		c.users(prev, cur, clients, geo)
+		c.wooKeys(prev, cur)
+	})
+	run("options", func() { c.options(prev, cur) })
+	run("files", files)
+	run("exposed", func() { c.exposed(cur) })
+	run("public", func() { c.public(cur) })
+	run("retention", func() { c.retention(cur) })
+	run("content", func() { c.content(cur) })
 	for _, e := range cur.Errors {
 		c.note("collector: " + e)
 	}
@@ -549,6 +562,10 @@ func unit(p, content string) string {
 }
 
 func (c *checker) checksums(cur *Snapshot, exp *Repo) {
+	if cur.Checksums.Skipped {
+		c.note("wordpress.org checksums weren't fetched (a local install was there), and the files couldn't be compared with it either: core and plugins unverified this time")
+		return
+	}
 	if exp == nil || !exp.PatchedCore {
 		for _, l := range cur.Checksums.Core {
 			switch {

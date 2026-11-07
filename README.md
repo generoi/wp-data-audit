@@ -95,6 +95,29 @@ wp-data-audit --env local --wp "ddev wp" --sh "ddev exec sh -s"   # try it on th
 The first run lists everything there is (all admins, every embed): accept the
 expected ones once, and later runs show only what's new or changed.
 
+Choosing what runs, piping, and timing:
+
+```sh
+wp-data-audit --only exposed,public      # no wp-cli, no hasher for public: nothing on the server runs
+wp-data-audit --skip content -v          # -v: each phase's seconds on stderr
+wp-data-audit script collector | ssh host 'cd /site && wp eval-file - --skip-plugins --skip-themes' > collected.txt
+wp-data-audit --collector collected.txt --hasher hashed.txt   # judge saved outputs (- for stdin)
+wp-data-audit --json | jq '.flags[] | select(.severity == "urgent")'
+```
+
+Checks are `accounts`, `options`, `files`, `exposed`, `public`, `retention`
+and `content`; skipping one skips its collector section, the hasher or the
+probes too. A run that skips `accounts` or `options` saves no snapshot (the
+next full run must still see what changed since the last one), and its
+report keeps the skipped checks' flags from the last full run.
+
+The collector and hasher run side by side, and wordpress.org's checksums are
+only fetched when there's no local install to compare with; a site takes
+about as long as its slower script (a large multisite: about 20 s). SIGINT,
+SIGTERM and SIGHUP stop both scripts (ssh then ends the remote side) and
+save nothing; state files are written atomically and the state lock is a
+`flock`, so a killed run leaves no damage.
+
 What's true for one site lives in its repo, in `data-audit.json` at the root
 (not composer.json: Composer's lock hash covers `extra`). `public_roles` keys
 are a site's host, or its blog id on a multisite:

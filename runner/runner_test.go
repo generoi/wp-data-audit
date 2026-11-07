@@ -65,6 +65,39 @@ func TestFinishAcceptFinish(t *testing.T) {
 	}
 }
 
+// A run that skips accounts leaves the baseline alone and keeps the last
+// report's account flags, so accept and the next full run still see them.
+func TestPartialRun(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	site := Target{Site: "alpha", Env: "production", Repo: t.TempDir()}
+	full := mustFinish(t, site)
+	snaps, _ := filepath.Glob(filepath.Join(StateDir(site), "snapshots", "*.json"))
+
+	part := site
+	part.Skip = map[string]bool{"accounts": true}
+	r, err := Prepare(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := r.Finish([]byte(strings.Replace(out, `"id":1,`, `"id":9,`, 1)), nil) // a new admin, unjudged
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range rep.Flags {
+		if f.Kind == "user" {
+			t.Fatalf("judged skipped accounts: %v", f)
+		}
+	}
+	if after, _ := filepath.Glob(filepath.Join(StateDir(site), "snapshots", "*.json")); len(after) != len(snaps) {
+		t.Fatalf("a partial run saved a snapshot: %v → %v", snaps, after)
+	}
+	saved, err := LastReport(site)
+	if err != nil || len(saved.Flags) != len(full.Flags) {
+		t.Fatalf("saved report %v %v, want the full run's %d flags", saved.Flags, err, len(full.Flags))
+	}
+}
+
 // Without the collector (the site's wp-cli failed), the hasher's files are
 // still judged, and no snapshot replaces the last full one.
 func TestFinishWithoutCollector(t *testing.T) {

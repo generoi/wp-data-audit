@@ -56,7 +56,17 @@ $wpda = [
     'wp_version' => (string) get_bloginfo('version'),
     'woocommerce' => get_option('woocommerce_version') !== false, // plugins are skipped: the option, not the class
     'multisite' => is_multisite(),
+    'timings' => [],
 ];
+// Each section's seconds, for -v; $wpda_skip (from the Go side) names the
+// sections not to run: content, retention, checksums.
+$wpda_skip ??= [];
+$wpda_t = microtime(true);
+$wpda_timed = function (string $section) use (&$wpda, &$wpda_t) {
+    $now = microtime(true);
+    $wpda['timings'][$section] = round($now - $wpda_t, 2);
+    $wpda_t = $now;
+};
 
 $wpda_options = [];
 $wpda_each(function (int $blog) use (&$wpda_options, $wpda_tag) {
@@ -208,6 +218,8 @@ foreach ($wpda_detail as $id => $d) {
     ];
 }
 
+$wpda_timed('accounts');
+
 // WooCommerce REST API keys, without the key or secret.
 $wpda['woo_keys'] = [];
 $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
@@ -232,7 +244,7 @@ $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
 // oldest entry and retention setting; per WooCommerce shop its order count,
 // oldest order and the anonymise/delete settings. Counts and dates only.
 $wpda['retention'] = ['forms' => [], 'woo' => []];
-$wpda_each(function (int $blog) use ($wpdb, &$wpda) {
+empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
     $has = fn (string $t) => (bool) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($t)));
     $p = $wpdb->prefix;
     if ($has("{$p}gf_entry") && $has("{$p}gf_form")) {
@@ -277,6 +289,7 @@ $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
         'settings' => $settings,
     ];
 });
+$wpda_timed('retention');
 
 // Content. SQL prefilters with LIKE (one scan per table), PHP decodes and
 // matches. A match is reported as kind + value: the script's host, the
@@ -417,7 +430,7 @@ $wpda_query = function (string $sql) use ($wpdb, &$wpda, $wpda_rows, &$wpda_erro
     return $rows;
 };
 
-$wpda_each(function (int $blog) use ($wpdb, $wpda_query, $wpda_like, $wpda_record, &$wpda_self, &$wpda_cur_blog) {
+empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpda_query, $wpda_like, $wpda_record, &$wpda_self, &$wpda_cur_blog) {
     $wpda_cur_blog = $blog;
     $wpda_self = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
     foreach ($wpda_query("SELECT ID, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND " . $wpda_like(['post_title', 'post_content', 'post_excerpt'])) as $r) {
@@ -447,38 +460,42 @@ $wpda['content'] = array_values($wpda_hits);
 if ($wpda_pcre > 0) {
     $wpda_errors[] = "content scan: {$wpda_pcre} pattern(s) hit PCRE's backtrack limit, so those values weren't fully scanned";
 }
+$wpda_timed('content');
 
 // Files are the hasher's (hasher.php), which runs without WordPress.
 
 // Checksums against wordpress.org, for sites whose files can't be compared
 // with a local install of the deployed commit: core, and the wp.org plugins
 // (premium ones have none and are only counted as skipped).
-$wpda['checksums'] = ['core' => [], 'plugins' => [], 'plugins_skipped' => 0];
-try {
-    $r = WP_CLI::runcommand('core verify-checksums', ['return' => 'all', 'exit_error' => false, 'launch' => false]);
-    foreach (preg_split('/\R/', $r->stdout . "\n" . $r->stderr) as $line) {
-        if (stripos($line, 'Warning:') !== false || stripos($line, 'Error:') !== false) {
-            $wpda['checksums']['core'][] = trim($line);
+$wpda['checksums'] = ['core' => [], 'plugins' => [], 'plugins_skipped' => 0, 'skipped' => ! empty($wpda_skip['checksums'])];
+if (empty($wpda_skip['checksums'])) {
+    try {
+        $r = WP_CLI::runcommand('core verify-checksums', ['return' => 'all', 'exit_error' => false, 'launch' => false]);
+        foreach (preg_split('/\R/', $r->stdout . "\n" . $r->stderr) as $line) {
+            if (stripos($line, 'Warning:') !== false || stripos($line, 'Error:') !== false) {
+                $wpda['checksums']['core'][] = trim($line);
+            }
         }
+    } catch (Throwable $e) {
+        $wpda_errors[] = 'core verify-checksums: ' . $e->getMessage();
     }
-} catch (Throwable $e) {
-    $wpda_errors[] = 'core verify-checksums: ' . $e->getMessage();
-}
-try {
-    $r = WP_CLI::runcommand('plugin verify-checksums --all --format=json', ['return' => 'all', 'exit_error' => false, 'launch' => false]);
-    if (preg_match('/\[.*\]/s', $r->stdout, $m)) {
-        foreach ((array) json_decode($m[0], true) as $row) {
-            $wpda['checksums']['plugins'][] = [
-                'plugin' => (string) ($row['plugin_name'] ?? ''),
-                'file' => (string) ($row['file'] ?? ''),
-                'message' => (string) ($row['message'] ?? ''),
-            ];
+    try {
+        $r = WP_CLI::runcommand('plugin verify-checksums --all --format=json', ['return' => 'all', 'exit_error' => false, 'launch' => false]);
+        if (preg_match('/\[.*\]/s', $r->stdout, $m)) {
+            foreach ((array) json_decode($m[0], true) as $row) {
+                $wpda['checksums']['plugins'][] = [
+                    'plugin' => (string) ($row['plugin_name'] ?? ''),
+                    'file' => (string) ($row['file'] ?? ''),
+                    'message' => (string) ($row['message'] ?? ''),
+                ];
+            }
         }
+        $wpda['checksums']['plugins_skipped'] = preg_match_all('/Could not retrieve the checksums/i', $r->stderr);
+    } catch (Throwable $e) {
+        $wpda_errors[] = 'plugin verify-checksums: ' . $e->getMessage();
     }
-    $wpda['checksums']['plugins_skipped'] = preg_match_all('/Could not retrieve the checksums/i', $r->stderr);
-} catch (Throwable $e) {
-    $wpda_errors[] = 'plugin verify-checksums: ' . $e->getMessage();
 }
+$wpda_timed('checksums');
 
 $wpda['errors'] = $wpda_errors;
 echo "\nWPDA-BEGIN\n" . wp_json_encode($wpda, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . "\nWPDA-END\n";

@@ -398,12 +398,15 @@ func TestParseRelease(t *testing.T) {
 }
 
 func TestScriptAndParse(t *testing.T) {
-	s, err := Script(map[string][]string{"members.example": {"subscriber"}, "3": {"member"}})
+	s, err := Script(map[string][]string{"members.example": {"subscriber"}, "3": {"member"}}, "content", "checksums")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(s, "<?php\n$wpda_public_roles = ['3' => ['member', ], 'members.example' => ['subscriber', ], ];\n") {
-		t.Fatalf("script head: %.120s", s)
+	if !strings.HasPrefix(s, "<?php\n$wpda_skip = ['content' => true, 'checksums' => true, ];\n$wpda_public_roles = ['3' => ['member', ], 'members.example' => ['subscriber', ], ];\n") {
+		t.Fatalf("script head: %.160s", s)
+	}
+	if _, err := Script(nil, "x'];system('id');//"); err == nil {
+		t.Fatal("an unknown section went into the script")
 	}
 	if _, err := Script(map[string][]string{"x": {"x'];system('id');//"}}); err == nil {
 		t.Fatal("a role with quotes went into the script")
