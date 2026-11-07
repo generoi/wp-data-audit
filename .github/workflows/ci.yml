@@ -38,11 +38,14 @@ jobs:
         ports: ["3306:3306"]
         options: >-
           --health-cmd="mysqladmin ping -proot" --health-interval=5s --health-timeout=5s --health-retries=20
-    env:
-      XDG_CONFIG_HOME: ${{ runner.temp }}/config
-      XDG_STATE_HOME: ${{ runner.temp }}/state
-      SITE: ${{ runner.temp }}/site
     steps:
+      - name: Paths (the runner context isn't available in a job's env)
+        run: |
+          {
+            echo "XDG_CONFIG_HOME=$RUNNER_TEMP/config"
+            echo "XDG_STATE_HOME=$RUNNER_TEMP/state"
+            echo "SITE=$RUNNER_TEMP/site"
+          } >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:

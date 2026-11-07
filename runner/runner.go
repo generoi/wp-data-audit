@@ -25,6 +25,7 @@ import (
 	"github.com/generoi/wp-data-audit/geo"
 	"github.com/generoi/wp-data-audit/store"
 	"github.com/generoi/wp-data-audit/web"
+	"github.com/generoi/wp-data-audit/wporg"
 )
 
 // Config is ~/.config/wp-data-audit/config.json: what's true for every site.
@@ -133,6 +134,12 @@ type Options struct {
 	Client *http.Client  // for the public URLs; web.NewClient when nil
 	Store  *store.Store  // store.Default when nil
 	Config *Config       // LoadConfig when nil
+	// Kinsta reads who reaches the site on Kinsta (company and site users,
+	// extra SFTP accounts); nil when the caller has no Kinsta key: then
+	// they're noted as not checked.
+	Kinsta func(ctx context.Context) (*audit.KinstaAccess, error)
+	GH     GH     // gh, for the repo's collaborators and deploy keys; the real gh when nil
+	WPOrg  string // wordpress.org's plugin API; wporg.Base when ""
 }
 
 // Result is a run's report (what this run judged; the saved one keeps the
@@ -312,9 +319,50 @@ func (r *run) gather(ctx context.Context, script string) audit.Facts {
 			r.time("hash the checkout's install", start)
 		})
 	}
+	if r.o.Skip.Runs(audit.Access) {
+		wg.Go(func() {
+			start := time.Now()
+			facts.Access = r.access(ctx)
+			r.time("GitHub and Kinsta access", start)
+		})
+	}
+	if r.o.Skip.Runs(audit.Plugins) && r.repo != nil && len(r.repo.WPOrgPlugins) > 0 {
+		wg.Go(func() {
+			start := time.Now()
+			client := r.o.Client
+			if client == nil {
+				client = web.NewClient()
+			}
+			facts.WPOrg = wporg.Lookup(ctx, client, cmp.Or(r.o.WPOrg, wporg.Base), r.repo.WPOrgPlugins)
+			r.time("wordpress.org plugins", start)
+		})
+	}
 	wg.Wait()
 	facts.Web = merge(exposed, public)
 	return facts
+}
+
+// access reads GitHub (through gh, in the checkout) and Kinsta (the
+// caller's func, when it has one); a part that failed is an error in it.
+func (r *run) access(ctx context.Context) *audit.AccessFacts {
+	a := &audit.AccessFacts{}
+	gh := r.o.GH
+	if gh == nil {
+		gh = execGH
+	}
+	if g, err := github(ctx, gh, r.t.Repo); err != nil {
+		a.Errors = append(a.Errors, err.Error())
+	} else {
+		a.GitHub = g
+	}
+	if r.o.Kinsta != nil {
+		if k, err := r.o.Kinsta(ctx); err != nil {
+			a.Errors = append(a.Errors, "Kinsta access: "+err.Error())
+		} else {
+			a.Kinsta = k
+		}
+	}
+	return a
 }
 
 // collect runs the collector; nil when it couldn't.

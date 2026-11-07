@@ -78,13 +78,18 @@ func Check(in Input) Result {
 	if f.Web == nil || f.Web.Base == "" {
 		missing[srcWeb] = "no site URL was known to ask"
 	}
+	if f.Access == nil {
+		missing[srcAccess] = "GitHub and Kinsta weren't asked"
+	}
 	for _, g := range []struct {
 		group Group
 		needs []source
 		check func()
 	}{
 		{Accounts, []source{srcSite}, c.accounts},
+		{Access, []source{srcAccess}, c.access},
 		{Options, []source{srcSite}, c.options},
+		{Plugins, []source{srcSite}, c.plugins},
 		{Files, []source{srcFiles}, c.files},
 		{Exposed, []source{srcFiles, srcWeb}, c.exposed},
 		{Public, []source{srcWeb}, c.public},
@@ -128,6 +133,7 @@ const (
 	srcSite source = iota
 	srcFiles
 	srcWeb
+	srcAccess
 )
 
 type checker struct {

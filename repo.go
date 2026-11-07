@@ -43,6 +43,9 @@ type Repo struct {
 	PatchedCore                 bool
 	PublicRoles                 map[string][]string
 	ClientDomains               []string
+	// WPOrgPlugins are the wordpress.org slugs of the plugins it deploys
+	// from wordpress.org (wp-plugin/ or wpackagist-plugin/ packages).
+	WPOrgPlugins []string
 	// Revision is the checkout's commit; Local its composer install's PHP
 	// files hashed like the server's (nil, with LocalWhy, when there's none).
 	Revision string
@@ -163,6 +166,9 @@ func ReadRepo(dir string) (*Repo, error) {
 	types := map[string]string{}
 	for _, p := range lock.Packages { // packages-dev aren't installed on production
 		types[p.Name] = p.Type
+		if vendor, slug, _ := strings.Cut(p.Name, "/"); p.Type == "wordpress-plugin" && (vendor == "wp-plugin" || vendor == "wpackagist-plugin") {
+			exp.WPOrgPlugins = append(exp.WPOrgPlugins, slug)
+		}
 		if set := where[installDir(p, cj.Extra.InstallerPaths)]; set != nil {
 			set[cmp.Or(p.Extra.InstallerName, base(p.Name))] = true
 		}

@@ -13,13 +13,77 @@ import (
 	"time"
 )
 
-// Facts is everything one audit observed, from its three sources. A nil
-// part didn't run: its checks are reported as not judged.
+// Facts is everything one audit observed, from its sources. A nil part
+// didn't run: its checks are reported as not judged.
 type Facts struct {
-	At    time.Time
-	Site  *SiteFacts // the collector: the database through the site's wp-cli
-	Files *FileFacts // the hasher: the release's files, by the server's own tools
-	Web   *WebFacts  // the HTTP probes, from outside
+	At     time.Time
+	Site   *SiteFacts   // the collector: the database through the site's wp-cli
+	Files  *FileFacts   // the hasher: the release's files, by the server's own tools
+	Web    *WebFacts    // the HTTP probes, from outside
+	Access *AccessFacts // who can reach the site outside WordPress
+	// WPOrg is wordpress.org's word on the repo's wordpress.org plugins, by
+	// slug; nil when it wasn't asked.
+	WPOrg map[string]WPOrgPlugin
+}
+
+// WPOrgPlugin is what wordpress.org says about a plugin: closed (with why
+// and when), or its last release's date. Err when it couldn't be asked.
+type WPOrgPlugin struct {
+	Closed      bool   `json:"closed,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	ClosedDate  string `json:"closed_date,omitempty"`
+	LastUpdated string `json:"last_updated,omitempty"` // "2006-01-02"
+	Err         string `json:"err,omitempty"`
+}
+
+// AccessFacts is who can reach the site's code or server outside
+// WordPress. A nil part wasn't asked (the CLI has no Kinsta key); Errors
+// say what was asked and failed.
+type AccessFacts struct {
+	GitHub *GitHubAccess
+	Kinsta *KinstaAccess
+	Errors []string
+}
+
+// GitHubAccess is the repo's outside collaborators (not members of its
+// organisation) and its deploy keys.
+type GitHubAccess struct {
+	Outside []Collaborator
+	Keys    []DeployKey
+}
+
+type Collaborator struct {
+	Login      string
+	Permission string // admin, maintain, push, triage, pull
+}
+
+type DeployKey struct {
+	ID       int64
+	Title    string
+	ReadOnly bool
+	Created  string
+	LastUsed string
+}
+
+// KinstaAccess is the Kinsta company's users who reach this site (company
+// roles reach every site) and the extra SFTP accounts of its environments.
+type KinstaAccess struct {
+	Users []KinstaUser
+	SFTP  []SFTPAccount
+}
+
+type KinstaUser struct {
+	Email string
+	Role  string // company-admin, company-developer, site-admin, ...
+	Scope string // company or site
+}
+
+type SFTPAccount struct {
+	Env        string // live, staging
+	Username   string
+	Root       string
+	Active     bool
+	Permission string // read or write
 }
 
 // SiteFacts is what the collector printed.
@@ -39,6 +103,10 @@ type SiteFacts struct {
 	ContentTruncated bool                `json:"content_truncated"`
 	Checksums        Checksums           `json:"checksums"`
 	Retention        RetentionFacts      `json:"retention"`
+	InstalledPlugins []string            `json:"installed_plugins"` // the plugin folder's entries: folders and single-file plugins
+	ActivePlugins    map[string][]string `json:"active_plugins"`    // blog id (or "network") → plugin files ("akismet/akismet.php")
+	Cron             map[string][]string `json:"cron"`           // blog id → scheduled hook names
+	Sensitive        map[string]string   `json:"sensitive"`      // option (blog-tagged) → its value's hash
 	Timings          map[string]float64  `json:"timings"` // seconds per collector section
 	PeakMB           float64             `json:"peak_mb"` // the PHP process's peak memory, WordPress included
 	Errors           []string            `json:"errors"`

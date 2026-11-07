@@ -33,6 +33,45 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// noGH stands in for gh: no test runs the real one.
+func noGH(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("no gh in tests") }
+
+// Access: gh's two reads (collaborators, deploy keys) and the caller's
+// Kinsta func, judged with the rest; --only access runs neither script.
+func TestRunAccess(t *testing.T) {
+	e := newEnv(t)
+	site := target(t, "alpha")
+	var asked []string
+	gh := func(_ context.Context, dir string, args ...string) ([]byte, error) {
+		if dir != site.Repo {
+			t.Errorf("gh ran in %s", dir)
+		}
+		asked = append(asked, args[2])
+		if strings.Contains(args[2], "/collaborators") {
+			return []byte("contractor\twrite\n"), nil
+		}
+		return []byte("7\tserver\tfalse\t2024-01-01T10:00:00Z\t\n8\tci\ttrue\t2024-01-01T10:00:00Z\t\n"), nil
+	}
+	kinsta := func(context.Context) (*audit.KinstaAccess, error) {
+		return &audit.KinstaAccess{SFTP: []audit.SFTPAccount{{Env: "live", Username: "uploader", Permission: "write", Active: true}}}, nil
+	}
+	skip, _ := audit.ParseSkip("access", "")
+	res, err := Run(context.Background(), site, Transport{}, Options{Skip: skip, Client: offline, Store: e.st, Config: e.cfg, GH: gh, Kinsta: kinsta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range res.Report.Flags {
+		got[f.ID] = true
+	}
+	if len(got) != 3 || !got["collaborator:contractor:write"] || !got["deploy-key:7"] || !got["sftp:live:uploader:write"] {
+		t.Fatalf("flags %v", got)
+	}
+	if len(asked) != 2 || !strings.HasPrefix(asked[0], "repos/{owner}/{repo}/collaborators?affiliation=outside") {
+		t.Fatalf("gh asked %q", asked)
+	}
+}
+
 func fixed(out string) func(context.Context, string, io.Writer) error {
 	return func(_ context.Context, _ string, w io.Writer) error { _, err := io.WriteString(w, out); return err }
 }
@@ -71,7 +110,7 @@ func newEnv(t *testing.T) env {
 
 func (e env) run(t *testing.T, tg Target, tr Transport, skip audit.Skip) audit.Report {
 	t.Helper()
-	res, err := Run(context.Background(), tg, tr, Options{Skip: skip, Client: offline, Store: e.st, Config: e.cfg})
+	res, err := Run(context.Background(), tg, tr, Options{Skip: skip, Client: offline, Store: e.st, Config: e.cfg, GH: noGH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +212,7 @@ func TestRunWithoutCollector(t *testing.T) {
 
 func TestRunNothingRan(t *testing.T) {
 	e := newEnv(t)
-	_, err := Run(context.Background(), target(t, "alpha"), Transport{}, Options{Client: offline, Store: e.st, Config: e.cfg})
+	_, err := Run(context.Background(), target(t, "alpha"), Transport{}, Options{Client: offline, Store: e.st, Config: e.cfg, GH: noGH})
 	if err == nil || !strings.Contains(err.Error(), "neither") {
 		t.Fatalf("err %v", err)
 	}
@@ -204,7 +243,7 @@ func TestStopSavesNothing(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	_, err := Run(ctx, site, Transport{Collect: slow, Hash: slow}, Options{Client: offline, Store: e.st, Config: e.cfg})
+	_, err := Run(ctx, site, Transport{Collect: slow, Hash: slow}, Options{Client: offline, Store: e.st, Config: e.cfg, GH: noGH})
 	if err == nil || !strings.Contains(err.Error(), "nothing saved") {
 		t.Fatalf("err %v", err)
 	}
@@ -231,7 +270,7 @@ func TestPipelineProbes(t *testing.T) {
 	withHome := strings.Replace(collected, `{"version":1,`, `{"version":1,"home":"`+srv.URL+`","options":{"home":"`+srv.URL+`"},`, 1)
 	withData := strings.Replace(hashed, "WPDA-END", "DATA 10 1700000000 web/app/uploads/wpallexport/exports/users.csv\nWPDA-END", 1)
 	res, err := Run(context.Background(), site, Transport{Collect: fixed(withHome), Hash: fixed(withData)},
-		Options{Client: srv.Client(), Store: e.st, Config: e.cfg})
+		Options{Client: srv.Client(), Store: e.st, Config: e.cfg, GH: noGH})
 	if err != nil {
 		t.Fatal(err)
 	}

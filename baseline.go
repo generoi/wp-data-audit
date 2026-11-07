@@ -15,6 +15,12 @@ type Baseline struct {
 	Options map[string]string `json:"options"`
 	Users   []BaselineUser    `json:"users"`
 	WooKeys []WooKeyRef       `json:"woo_keys"`
+	// Sensitive options' value hashes, active plugins and cron hooks, per
+	// site. Nil in a baseline from before they were collected: then nothing
+	// is "new" against it.
+	Sensitive map[string]string   `json:"sensitive"` // not omitempty: an empty one is a baseline, nil isn't
+	Plugins   map[string][]string `json:"plugins"`
+	Cron      map[string][]string `json:"cron"`
 }
 
 // BaselineUser is a listed account. LastSeen is the newest sign of its use
@@ -74,7 +80,7 @@ func lastSeen(prev *Baseline, s *SiteFacts) map[int]int64 {
 }
 
 func newBaseline(at time.Time, s *SiteFacts, seen map[int]int64) *Baseline {
-	b := &Baseline{At: at, Home: s.Home, Options: s.Options}
+	b := &Baseline{At: at, Home: s.Home, Options: s.Options, Sensitive: s.Sensitive, Plugins: s.ActivePlugins, Cron: s.Cron}
 	for _, u := range s.Users {
 		bu := BaselineUser{ID: u.ID, Roles: slices.Sorted(slices.Values(u.Roles)), Privileged: u.Privileged, LastSeen: seen[u.ID]}
 		for _, p := range u.AppPasswords {

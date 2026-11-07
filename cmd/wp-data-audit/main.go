@@ -31,14 +31,14 @@ const usage = `usage:
   wp-data-audit [--env production] [--repo DIR] [--only|--skip CHECKS] [--json] [-v]
                 [--wp CMD] [--sh CMD] [--collector FILE] [--hasher FILE]
       audit the site, print the flags (exit 1 if any).
-      CHECKS: accounts, options, files, exposed, public, retention, content
+      CHECKS: accounts, access, options, plugins, files, exposed, public, retention, content
       (comma-separated); skipping one also skips its remote work.
       --wp replaces "vendor/bin/wp @<env>", --sh the ssh to the alias's host
       (e.g. --env local --wp "ddev wp" --sh "ddev exec sh -s");
       --collector, --hasher judge saved outputs instead (- for stdin).
   wp-data-audit accept --reason WHY [--everywhere] [--env production] [--repo DIR] ID...
       accept flags from the last audit; they stay quiet until what they describe changes.
-      --everywhere: content flags (a script or iframe host) on every site
+      --everywhere: content flags (a script or iframe host) and Kinsta users, on every site
   wp-data-audit script collector|hasher [--repo DIR] [--only|--skip CHECKS]
       print a script, to pipe to a site by hand:
       wp-data-audit script hasher | ssh host 'cd /site && sh -s' > hashed.txt
@@ -107,7 +107,7 @@ func checkFlags(fs *flag.FlagSet) func() (audit.Skip, error) {
 func accept(args []string) error {
 	fs, target := flags("accept")
 	reason := fs.String("reason", "", "why these are expected (required)")
-	everywhere := fs.Bool("everywhere", false, "accept content flags on every site")
+	everywhere := fs.Bool("everywhere", false, "accept content and Kinsta user flags on every site")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

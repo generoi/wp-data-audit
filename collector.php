@@ -276,6 +276,55 @@ $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
     }
 });
 
+// Per site: active plugins, scheduled (cron) hook names, and a hash of each
+// sensitive option (never its value: gateway settings hold API keys). The Go
+// side compares them with the last audit. Network-active plugins are
+// "network"'s.
+$wpda['active_plugins'] = [];
+// Installed: the plugin folder's entries (folders, and single-file plugins),
+// by name only, as plugins aren't loaded.
+$wpda['installed_plugins'] = [];
+foreach (defined('WP_PLUGIN_DIR') && is_dir(WP_PLUGIN_DIR) ? (scandir(WP_PLUGIN_DIR) ?: []) : [] as $entry) {
+    if ($entry[0] !== '.' && (is_dir(WP_PLUGIN_DIR . "/{$entry}") || str_ends_with($entry, '.php')) && $entry !== 'index.php') {
+        $wpda['installed_plugins'][] = $entry;
+    }
+}
+$wpda['cron'] = [];
+$wpda['sensitive'] = [];
+if (is_multisite()) {
+    $wpda['active_plugins']['network'] = array_map('strval', array_keys((array) get_site_option('active_sitewide_plugins', [])));
+}
+$wpda_each(function (int $blog) use ($wpdb, &$wpda, $wpda_tag) {
+    $wpda['active_plugins'][(string) $blog] = array_values(array_map('strval', (array) get_option('active_plugins', [])));
+    $hooks = [];
+    foreach ((array) (function_exists('_get_cron_array') ? _get_cron_array() : []) as $events) {
+        foreach (array_keys((array) $events) as $hook) {
+            $hooks[(string) $hook] = true;
+        }
+    }
+    ksort($hooks);
+    $wpda['cron'][(string) $blog] = array_keys($hooks);
+    // Theme, upload paths, role definitions, SMTP plugins' settings, and each
+    // payment gateway's settings (WooCommerce's gateway order names them).
+    $names = ['template', 'stylesheet', 'upload_path', 'upload_url_path', $wpdb->prefix . 'user_roles',
+        'wp_mail_smtp', 'postman_options', 'post_smtp_options', 'swpsmtp_options', 'easy_wp_smtp', 'fluentmail-settings', 'woocommerce_gateway_order'];
+    foreach (array_keys((array) get_option('woocommerce_gateway_order', [])) as $gateway) {
+        if (preg_match('/^[a-z0-9_-]{1,60}$/i', (string) $gateway)) {
+            $names[] = "woocommerce_{$gateway}_settings";
+        }
+    }
+    $in = implode(', ', array_fill(0, count($names), '%s'));
+    foreach ($wpdb->get_results($wpdb->prepare("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name IN ({$in})", $names)) as $o) {
+        $name = $o->option_name === $wpdb->prefix . 'user_roles' ? 'user_roles' : (string) $o->option_name;
+        $wpda['sensitive'][$wpda_tag($blog, $name)] = substr(hash('sha256', (string) $o->option_value), 0, 16);
+    }
+    $wpdb->flush();
+});
+$wpda['active_plugins'] = (object) $wpda['active_plugins'];
+$wpda['cron'] = (object) $wpda['cron'];
+$wpda['sensitive'] = (object) $wpda['sensitive'];
+$wpda_timed('plugins');
+
 // How long personal data is kept: per Gravity Forms form its entry count,
 // oldest entry and retention setting; per WooCommerce shop its order count,
 // oldest order and the anonymise/delete settings. Counts and dates only.

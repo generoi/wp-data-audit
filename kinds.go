@@ -33,10 +33,12 @@ const (
 	Public    Group = "public"
 	Retention Group = "retention"
 	Content   Group = "content"
+	Plugins   Group = "plugins"
+	Access    Group = "access"
 )
 
 // Groups are every group, in report order.
-var Groups = []Group{Accounts, Options, Files, Exposed, Public, Retention, Content}
+var Groups = []Group{Accounts, Access, Options, Plugins, Files, Exposed, Public, Retention, Content}
 
 // Kind is what a flag is about. Every kind belongs to one group.
 type Kind string
@@ -59,12 +61,19 @@ const (
 	KindPublic       Kind = "public"
 	KindRetention    Kind = "retention"
 	KindContent      Kind = "content"
+	KindCron         Kind = "cron"
+	KindPlugin       Kind = "plugin"
+	KindCollaborator Kind = "collaborator"
+	KindDeployKey    Kind = "deploy-key"
+	KindKinstaUser   Kind = "kinsta-user"
+	KindSFTP         Kind = "sftp"
 )
 
 var kindGroup = map[Kind]Group{
 	KindPublicRole: Accounts, KindRegistration: Accounts, KindUser: Accounts, KindCapabilities: Accounts,
 	KindAppPassword: Accounts, KindSession: Accounts, KindWooKey: Accounts, KindDormant: Accounts, KindLeaver: Accounts,
-	KindOption:  Options,
+	KindCollaborator: Access, KindDeployKey: Access, KindKinstaUser: Access, KindSFTP: Access,
+	KindOption: Options, KindCron: Options, KindPlugin: Plugins,
 	KindFile:    Files, KindRelease: Files, KindChecksum: Files,
 	KindExposed: Exposed, KindPublic: Public, KindRetention: Retention, KindContent: Content,
 }
@@ -118,7 +127,7 @@ func (s Skip) Runs(g Group) bool { return !s[g] }
 // Needs says which sources the groups that run need: the collector (the
 // database), the hasher (the release's files) and the web probes.
 func (s Skip) Needs() (collector, hasher, web bool) {
-	collector = s.Runs(Accounts) || s.Runs(Options) || s.Runs(Retention) || s.Runs(Content)
+	collector = s.Runs(Accounts) || s.Runs(Options) || s.Runs(Plugins) || s.Runs(Retention) || s.Runs(Content)
 	hasher = s.Runs(Files) || s.Runs(Exposed)
 	web = s.Runs(Exposed) || s.Runs(Public)
 	return

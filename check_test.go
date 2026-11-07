@@ -12,11 +12,12 @@ import (
 // and options.
 func TestCheckJudgesWhatRan(t *testing.T) {
 	full := Check(Input{Facts: Facts{At: now, Site: site0()}})
-	if !slices.Equal(full.Report.Judged, []Group{Accounts, Options, Retention, Content}) || full.Baseline == nil {
+	if !slices.Equal(full.Report.Judged, []Group{Accounts, Options, Plugins, Retention, Content}) || full.Baseline == nil {
 		t.Fatalf("collector only: judged %v, baseline %v", full.Report.Judged, full.Baseline)
 	}
 	if !strings.Contains(noteTexts(full.Report), "files not checked: the hasher didn't run") ||
-		!strings.Contains(noteTexts(full.Report), "public not checked: no site URL was known to ask") {
+		!strings.Contains(noteTexts(full.Report), "public not checked: no site URL was known to ask") ||
+		!strings.Contains(noteTexts(full.Report), "access not checked: GitHub and Kinsta weren't asked") {
 		t.Fatalf("notes: %s", noteTexts(full.Report))
 	}
 	for _, n := range full.Report.Notes {
