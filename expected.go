@@ -31,8 +31,10 @@ const SettingsFile = "data-audit.json"
 // ReadRepo reads a Bedrock checkout: what it deploys (Composer packages by
 // their installer path, plus what git tracks under web/app) and its
 // SettingsFile. The checkout should be at the deployed commit: a branch that
-// adds or drops a plugin shows up as a flag.
-func ReadRepo(dir string) (*Repo, error) {
+// adds or drops a plugin shows up as a flag. hashFiles hashes the composer
+// install's PHP files for the release comparison (Local); without it a run
+// that skips the file checks doesn't pay for that.
+func ReadRepo(dir string, hashFiles bool) (*Repo, error) {
 	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}}
 
 	var cj struct {
@@ -121,10 +123,10 @@ func ReadRepo(dir string) (*Repo, error) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "vendor", "composer", "installed.json")); err != nil {
 		exp.LocalWhy = "the checkout has no composer install"
+	} else if exp.Dir = dir; !hashFiles {
+		exp.LocalWhy = "file checks skipped"
 	} else if exp.Local, err = hashTree(dir); err != nil {
 		exp.Local, exp.LocalWhy = nil, "hashing the checkout: "+err.Error()
-	} else {
-		exp.Dir = dir
 	}
 
 	out, err := exec.Command("git", "-C", dir, "ls-files", "-z", "--", ContentDir).Output()

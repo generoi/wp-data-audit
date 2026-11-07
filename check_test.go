@@ -333,7 +333,7 @@ func TestReadRepo(t *testing.T) {
 			t.Fatalf("git %v: %v %s", args, err, out)
 		}
 	}
-	exp, err := ReadRepo(dir)
+	exp, err := ReadRepo(dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}

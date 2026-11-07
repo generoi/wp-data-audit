@@ -79,7 +79,7 @@ type Repo struct {
 	Revision string
 	Local    map[string]string
 	LocalWhy string
-	// Dir is the checkout, set with Local: a data file the install has at the
+	// Dir is the checkout when it has a composer install: a data file it has at the
 	// same path is the release's own (a plugin's sample CSV), not a leak.
 	Dir string
 }

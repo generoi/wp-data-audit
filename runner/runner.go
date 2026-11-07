@@ -92,7 +92,8 @@ func (r *Run) Time(phase string, start time.Time) {
 func Prepare(t Target) (*Run, error) {
 	r := &Run{Target: t}
 	start := time.Now()
-	repo, err := audit.ReadRepo(t.Repo)
+	// Only the file comparison needs the install hashed.
+	repo, err := audit.ReadRepo(t.Repo, !t.Skip["files"])
 	r.Time("read and hash the checkout", start)
 	if err != nil {
 		r.notes = append(r.notes, "can't read the repo, so plugins weren't compared and no role counts as public: "+err.Error())
