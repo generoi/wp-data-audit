@@ -225,9 +225,9 @@ func (p *prober) site(home, siteurl string) audit.PublicSite {
 	if strings.HasPrefix(home, "https://") && h.Get("Strict-Transport-Security") == "" {
 		s.Headers = append(s.Headers, "Strict-Transport-Security")
 	}
-	if h.Get("X-Frame-Options") == "" && !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors") {
-		s.Headers = append(s.Headers, "X-Frame-Options or CSP frame-ancestors")
-	}
+	// No framing check: the fleet sends X-Frame-Options on wp-admin, login and
+	// REST only (gds-security-hardening, like core), as a public page may
+	// rightly be embedded elsewhere.
 	if !strings.EqualFold(h.Get("X-Content-Type-Options"), "nosniff") {
 		s.Headers = append(s.Headers, "X-Content-Type-Options")
 	}

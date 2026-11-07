@@ -104,7 +104,7 @@ func TestProbePublic(t *testing.T) {
 		t.Fatalf("sites %+v (a test domain must be left out)", w.Sites)
 	}
 	s := w.Sites[0]
-	if s.Err != "" || strings.Join(s.Users, ",") != "jane-admin,editor" || s.AuthorSlug != "jane-admin" || !s.XMLRPC || !s.Listing || len(s.Headers) != 2 || s.CertExpiry.IsZero() {
+	if s.Err != "" || strings.Join(s.Users, ",") != "jane-admin,editor" || s.AuthorSlug != "jane-admin" || !s.XMLRPC || !s.Listing || strings.Join(s.Headers, ",") != "Strict-Transport-Security" || s.CertExpiry.IsZero() {
 		t.Fatalf("probe %+v", s)
 	}
 }
