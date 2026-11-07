@@ -115,6 +115,15 @@ func ParseRelease(out []byte) (*Release, error) {
 		case "FILES", "SILENCE":
 			section = key
 			continue
+		case "DATA":
+			if val == "" {
+				section = key
+			} else if d, err := dataLine(val); err != nil {
+				r.Errors = append(r.Errors, err.Error())
+			} else {
+				r.Data = append(r.Data, d)
+			}
+			continue
 		case "":
 			continue
 		}
@@ -204,6 +213,31 @@ type Release struct {
 	Files    map[string]string `json:"files"`
 	Silence  map[string]bool   `json:"silence,omitempty"`
 	Errors   []string          `json:"errors"`
+	// Data are files by name a web server shouldn't hand out (dumps, logs,
+	// exports); Exposed is what Exposure picked from them, with what the
+	// public URL answered (runner.Probe).
+	Data    []DataFile `json:"data,omitempty"`
+	Exposed *Exposure  `json:"exposed,omitempty"`
+}
+
+// DataFile is one DATA line: never the content, only what find knows.
+type DataFile struct {
+	Path  string `json:"path"`
+	Size  int64  `json:"size"`
+	Mtime int64  `json:"mtime"`
+}
+
+// dataLine is "<size> <mtime> <path>" (mtime with find's fraction).
+func dataLine(val string) (DataFile, error) {
+	size, rest, _ := strings.Cut(val, " ")
+	mt, path, ok := strings.Cut(rest, " ")
+	s, err1 := strconv.ParseInt(size, 10, 64)
+	m, err2 := strconv.ParseFloat(mt, 64)
+	if !ok || err1 != nil || err2 != nil || path == "" {
+		return DataFile{}, fmt.Errorf("hasher: unexpected DATA line %q", firstN(val, 80))
+	}
+	path = strings.TrimPrefix(strings.ReplaceAll(path, "//", "/"), "./")
+	return DataFile{Path: path, Size: s, Mtime: int64(m)}, nil
 }
 
 type Registration struct {

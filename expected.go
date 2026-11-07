@@ -123,6 +123,8 @@ func ReadRepo(dir string) (*Repo, error) {
 		exp.LocalWhy = "the checkout has no composer install"
 	} else if exp.Local, err = hashTree(dir); err != nil {
 		exp.Local, exp.LocalWhy = nil, "hashing the checkout: "+err.Error()
+	} else {
+		exp.Dir = dir
 	}
 
 	out, err := exec.Command("git", "-C", dir, "ls-files", "-z", "--", ContentDir).Output()

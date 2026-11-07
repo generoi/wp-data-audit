@@ -77,6 +77,9 @@ type Repo struct {
 	Revision string
 	Local    map[string]string
 	LocalWhy string
+	// Dir is the checkout, set with Local: a data file the install has at the
+	// same path is the release's own (a plugin's sample CSV), not a leak.
+	Dir string
 }
 
 // Geo resolves an IP to an ISO country code, "" when unknown.
@@ -112,8 +115,9 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 		clients = exp.ClientDomains
 	}
 	if cur.NoCollector {
-		c.note("the collector didn't run, so accounts, options and content weren't checked: only PHP files")
+		c.note("the collector didn't run, so accounts, options and content weren't checked: only files")
 		c.files(cur, exp)
+		c.exposed(cur)
 		return c.sorted()
 	}
 	c.registration(cur)
@@ -123,6 +127,7 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 	if !c.files(cur, exp) { // compared with the deployed commit: wordpress.org's checksums add nothing
 		c.checksums(cur, exp)
 	}
+	c.exposed(cur)
 	c.content(cur)
 	for _, e := range cur.Errors {
 		c.note("collector: " + e)
@@ -362,8 +367,7 @@ func (c *checker) files(cur *Snapshot, exp *Repo) (compared bool) {
 	units := map[string]bool{} // undeployed plugins etc., flagged once as a whole
 	// A checkout at another commit than production says nothing about what
 	// production deploys: only uploads are judged then.
-	stale := exp != nil && rel.Revision != "" && exp.Revision != "" &&
-		!strings.HasPrefix(exp.Revision, rel.Revision) && !strings.HasPrefix(rel.Revision, exp.Revision)
+	stale := stale(rel, exp)
 	for _, p := range paths {
 		v := rel.Files[p]
 		if rest, ok := strings.CutPrefix(p, uploads); ok {

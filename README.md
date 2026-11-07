@@ -42,6 +42,20 @@ It flags:
   be compared and are only counted
 - scripts, iframes, `javascript:` and `data:` URLs, PHP calls and hidden links in
   posts, meta, options, terms and approved comments, plain or encoded
+- files anyone can download that shouldn't be public: database dumps,
+  backups, archives, logs, keys, `.git`, and documents and exports (`csv`,
+  `xls*`, `pdf`, `doc*`, …) in plugin folders under uploads or outside the
+  media library, or anywhere under a name that suggests people's data
+  (customers, members, orders, applications, in English, Finnish and
+  Swedish). The hasher lists only size, date and path; the audit then asks
+  each file's public URL with a HEAD request, so a file a plugin's
+  `.htaccess` was meant to protect (which nginx ignores) shows as served.
+  Served files and listed folders are urgent, one flag per plugin folder
+  (`uploads/wpallexport/exports`); risky files the URL doesn't serve are for
+  review, and a media library upload with a telling name only for review.
+  Media library uploads, Gravity Forms uploads, plugin JSON and folders a
+  plugin serves on purpose (Complianz) are only counted. On a multisite each
+  site's uploads are asked for on that site's own domain
 
 On a multisite every site is covered; facts from sites other than the main
 one are tagged with their blog id, and network admins show as `super_admin`.

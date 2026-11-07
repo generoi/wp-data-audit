@@ -6,9 +6,11 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,7 +57,10 @@ type Target struct {
 type Run struct {
 	Target
 	Script, Hasher string
-	repo           *audit.Repo
+	// Client asks the site's public URLs about files that may be exposed
+	// (audit.NewClient when nil). Only candidates are asked: none, no request.
+	Client *http.Client
+	repo   *audit.Repo
 	notes          []string
 }
 
@@ -144,6 +149,17 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 	if db, err := geo.Open(path); err == nil {
 		defer db.Close()
 		g = db
+	}
+	if rel := snap.Release; rel != nil {
+		rel.Exposed = audit.Candidates(rel, r.repo)
+		home, options := snap.Home, snap.Options
+		if home == "" && prev != nil {
+			home, options = prev.Home, prev.Options
+		}
+		base := audit.DocrootURL(home)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		rel.Exposed.Probe(ctx, r.Client, rel, base, audit.BlogURLs(base, options))
+		cancel()
 	}
 	report := audit.Check(prev, snap, audit.Site{
 		AllowedCountries: cfg.AllowedCountries,
