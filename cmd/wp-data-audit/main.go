@@ -114,7 +114,7 @@ func auditSite(args []string) error {
 	out, err := runWP(t.Repo, append(slices.Clone(base), audit.WPArgs...), r.Script)
 	if err != nil { // the hasher needs no wp-cli: the files are still checked
 		fmt.Fprintln(os.Stderr, "wp-data-audit: collector:", err)
-		r.Note("the collector failed (" + err.Error() + "); the site's wp-cli may run the wrong PHP: set php_path for the alias in wp-cli.yml")
+		r.Note("the collector failed (" + err.Error() + "); the site's wp-cli may run the wrong PHP: set bin_path for the alias in wp-cli.yml to the folder of the right php (php_path only works where the release's vendor/bin/wp can execute)")
 		out = nil
 	}
 	// The hasher runs the server's own sh, find and sha256sum, never the
