@@ -130,6 +130,18 @@ func TestAccess(t *testing.T) {
 	if len(got) != 6 {
 		t.Errorf("access flags %v", slices.Sorted(maps.Keys(got)))
 	}
+	// Without client_domains, the site's own domain is the client's: no file
+	// needed for the common case.
+	s := site0()
+	s.Options = map[string]string{"home": "https://www.shop.example", "2:home": "https://brand.example"}
+	own := Input{Facts: Facts{At: now, Site: s, Access: &AccessFacts{Kinsta: &KinstaAccess{Users: []KinstaUser{
+		{Email: "editor@shop.example", Role: "site-admin", Scope: "site"},
+		{Email: "pr@mail.brand.example", Role: "site-admin", Scope: "site"},
+		{Email: "x@elsewhere.example", Role: "site-admin", Scope: "site"},
+	}}}}, Policy: Policy{StaffDomains: []string{"staff.example"}, Skip: Skip{Accounts: true}}}
+	if got := onlyKind(Check(own).Report, KindKinstaUser); len(got) != 1 || got["kinsta-user:x@elsewhere.example:site-admin"] == "" {
+		t.Errorf("site-domain default: %v", got)
+	}
 	a.Kinsta = nil
 	if r := Check(in).Report; !strings.Contains(noteTexts(r), "Kinsta users and SFTP accounts not checked") {
 		t.Errorf("notes: %s", noteTexts(r))

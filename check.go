@@ -4,11 +4,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // Policy is what's true beyond the site's own facts and repo: who runs the
@@ -193,6 +197,38 @@ func idPart(s string) string {
 		return s
 	}
 	return "h" + short(s)
+}
+
+// clientDomains are the client's email domains: the repo's client_domains
+// plus each site's own registrable domain (www.client.example →
+// client.example), so most sites need no data-audit.json.
+func (c *checker) clientDomains() []string {
+	set := map[string]bool{}
+	if c.in.Repo != nil {
+		for _, d := range c.in.Repo.ClientDomains {
+			set[strings.ToLower(d)] = true
+		}
+	}
+	var opts map[string]string
+	switch {
+	case c.in.Facts.Site != nil:
+		opts = c.in.Facts.Site.Options
+	case c.in.Prev != nil:
+		opts = c.in.Prev.Options
+	}
+	for k, v := range opts {
+		if k != "home" && !strings.HasSuffix(k, ":home") {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil {
+			continue
+		}
+		if d, err := publicsuffix.EffectiveTLDPlusOne(strings.ToLower(u.Hostname())); err == nil {
+			set[d] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(set))
 }
 
 func domainIn(email string, domains []string) bool {

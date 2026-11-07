@@ -23,11 +23,7 @@ var wp68 = time.Date(2025, 4, 15, 0, 0, 0, 0, time.UTC)
 func (c *checker) accounts() {
 	s, prev := c.in.Facts.Site, c.in.Prev
 	c.registration(s)
-	var clients []string
-	if c.in.Repo != nil {
-		clients = c.in.Repo.ClientDomains
-	}
-	known := append(slices.Clone(c.p.StaffDomains), clients...)
+	known := append(slices.Clone(c.p.StaffDomains), c.clientDomains()...)
 	if len(known) == 0 {
 		c.info("no staff or client email domains configured: email domains not checked")
 	}

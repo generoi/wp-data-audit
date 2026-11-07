@@ -30,10 +30,7 @@ func (c *checker) access() {
 		}
 	}
 	if k := a.Kinsta; k != nil {
-		var client []string
-		if c.in.Repo != nil {
-			client = c.in.Repo.ClientDomains
-		}
+		client := c.clientDomains()
 		for _, u := range k.Users {
 			email := strings.ToLower(u.Email)
 			staffDomain := domainIn(email, c.p.StaffDomains)

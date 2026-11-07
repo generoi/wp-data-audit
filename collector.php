@@ -56,6 +56,17 @@ $wpda_public = function (int $blog) use ($wpda_public_roles): array {
     if (get_option('woocommerce_version')) {
         $roles[] = 'customer';
     }
+    // Open registration: anyone gets the default role, so it's public here,
+    // but only while it can do no more than read. A default role with more is
+    // the registration check's urgent flag, and its holders stay listed.
+    $open = is_multisite()
+        ? $blog === (int) get_main_site_id() && in_array(get_site_option('registration'), ['user', 'all'], true)
+        : (bool) get_option('users_can_register');
+    $default = (string) get_option('default_role');
+    $role = $open && $default !== '' ? get_role($default) : null;
+    if ($role && ! array_diff(array_keys(array_filter($role->capabilities)), ['read', 'level_0'])) {
+        $roles[] = $default;
+    }
 
     return $roles;
 };
