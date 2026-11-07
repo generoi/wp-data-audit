@@ -29,6 +29,7 @@ type Config struct {
 	AllowedCountries []string `json:"allowed_countries"`
 	AllowedIPs       []string `json:"allowed_ips"`
 	StaffDomains     []string `json:"staff_domains"`
+	StaffEmails      []string `json:"staff_emails"` // the current staff: a staff-domain account not on it is flagged
 	GeoIP            string   `json:"geoip"` // default geo.DefaultPath()
 }
 
@@ -150,21 +151,30 @@ func (r *Run) Finish(out, hashed []byte) (audit.Report, error) {
 		defer db.Close()
 		g = db
 	}
+	if !snap.NoCollector {
+		audit.CarryLastSeen(prev, snap)
+	}
+	home, options := snap.Home, snap.Options
+	if home == "" && prev != nil { // the collector didn't run: last month's URLs
+		home, options = prev.Home, prev.Options
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	bedrock := true // the fleet's layout, when the hasher didn't say
 	if rel := snap.Release; rel != nil {
+		bedrock = rel.Content == "web/app"
 		rel.Exposed = audit.Candidates(rel, r.repo)
-		home, options := snap.Home, snap.Options
-		if home == "" && prev != nil {
-			home, options = prev.Home, prev.Options
-		}
 		base := audit.DocrootURL(home)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		rel.Exposed.Probe(ctx, r.Client, rel, base, audit.BlogURLs(base, options))
-		cancel()
+	}
+	if sites := audit.SiteURLs(options); len(sites) > 0 {
+		snap.Public = audit.ProbePublic(ctx, r.Client, sites, bedrock)
 	}
 	report := audit.Check(prev, snap, audit.Site{
 		AllowedCountries: cfg.AllowedCountries,
 		AllowedIPs:       cfg.AllowedIPs,
 		StaffDomains:     cfg.StaffDomains,
+		StaffEmails:      cfg.StaffEmails,
 		Accepted:         accepted,
 		Pending:          pending,
 	}, r.repo, g)

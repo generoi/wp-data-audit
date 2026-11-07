@@ -299,7 +299,7 @@ func NewClient() *http.Client {
 // No file's content is read.
 func (e *Exposure) Probe(ctx context.Context, client *http.Client, rel *Release, base string, blogs map[string]string) {
 	e.Base, e.Blogs = base, blogs
-	if base == "" || len(e.Files) == 0 {
+	if base == "" || len(e.Files) == 0 || reserved(base) {
 		return
 	}
 	if client == nil {

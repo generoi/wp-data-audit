@@ -23,6 +23,14 @@ It flags:
   urgently, email domains outside the staff and client domains. Only
   `customer` on WooCommerce sites and the roles a repo's `data-audit.json` declares are public,
   so a subscriber on a site without sign-ups is flagged too
+- listed accounts not used in over a year. WordPress keeps no last login, so
+  this is the newest of: a session's login, WooCommerce's or a plugin's
+  last-activity meta, an application password's last use, and every earlier
+  audit's (a login seen once is remembered). With none on record, a phpass
+  password hash counts: since WordPress 6.8 (April 2025) a password login
+  rehashes it, so a phpass hash means no password login since then
+- staff-domain accounts whose address isn't on the config's `staff_emails`
+  (people who left, aliases, shared addresses)
 - capabilities granted outside a user's roles (role injection)
 - open registration, urgently when the default role can do more than read
 - application passwords and WooCommerce REST API keys
@@ -56,6 +64,14 @@ It flags:
   Media library uploads, Gravity Forms uploads, plugin JSON and folders a
   plugin serves on purpose (Complianz) are only counted. On a multisite each
   site's uploads are asked for on that site's own domain
+- what each site's public URL gives away: the REST API listing users,
+  `?author=1` redirecting to a login slug, XML-RPC answering, the uploads
+  folder listed, missing security headers (HSTS, framing, nosniff), a TLS
+  certificate expiring within two weeks. Documentation and test domains
+  (`example.com`, `.test`, …) are never asked
+- personal data kept with no end: Gravity Forms forms with entries over two
+  years old and no retention period, and shops with orders over two years old
+  that never anonymise completed orders. Only counts and dates are collected
 
 On a multisite every site is covered; facts from sites other than the main
 one are tagged with their blog id, and network admins show as `super_admin`.

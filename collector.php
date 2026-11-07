@@ -175,6 +175,24 @@ foreach ($wpda_detail as $id => $d) {
         }
     }
     usort($sessions, fn ($a, $b) => $b['login'] <=> $a['login']);
+    // WordPress keeps no last login; WooCommerce and login-tracking plugins
+    // do, under these keys (a timestamp or a date).
+    $last_active = 0;
+    foreach (['wc_last_active', 'last_login', '_last_login', 'wp-last-login', 'last_activity'] as $key) {
+        $v = get_user_meta($id, $key, true);
+        $t = is_numeric($v) ? (int) $v : (is_string($v) && $v !== '' ? (int) strtotime($v) : 0);
+        $last_active = max($last_active, $t > 0 && $t <= time() + 86400 ? $t : 0);
+    }
+    // The hash's scheme, never the hash: since WordPress 6.8 a password login
+    // rehashes phpass ($P$) to $wp$, so phpass means no password login since.
+    $pass = (string) $u->user_pass;
+    $hash = match (true) {
+        str_starts_with($pass, '$wp$') => 'wp-bcrypt',
+        str_starts_with($pass, '$P$') || str_starts_with($pass, '$H$') => 'phpass',
+        (bool) preg_match('/^[0-9a-f]{32}$/', $pass) => 'md5',
+        str_starts_with($pass, '$2y$') || str_starts_with($pass, '$argon') => 'bcrypt',
+        default => 'other',
+    };
     $wpda['users'][] = [
         'id' => $id,
         'login' => (string) $u->user_login,
@@ -185,6 +203,8 @@ foreach ($wpda_detail as $id => $d) {
         'extra_caps' => $d['extra_caps'],
         'sessions' => array_slice($sessions, 0, 20),
         'app_passwords' => $d['app_passwords'],
+        'last_active' => $last_active,
+        'hash' => $hash,
     ];
 }
 
@@ -206,6 +226,56 @@ $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
             'last_access' => (string) $k->last_access,
         ];
     }
+});
+
+// How long personal data is kept: per Gravity Forms form its entry count,
+// oldest entry and retention setting; per WooCommerce shop its order count,
+// oldest order and the anonymise/delete settings. Counts and dates only.
+$wpda['retention'] = ['forms' => [], 'woo' => []];
+$wpda_each(function (int $blog) use ($wpdb, &$wpda) {
+    $has = fn (string $t) => (bool) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($t)));
+    $p = $wpdb->prefix;
+    if ($has("{$p}gf_entry") && $has("{$p}gf_form")) {
+        $meta = [];
+        if ($has("{$p}gf_form_meta")) {
+            foreach ($wpdb->get_results("SELECT form_id, display_meta FROM {$p}gf_form_meta") as $m) {
+                $d = json_decode((string) $m->display_meta, true);
+                $meta[(int) $m->form_id] = $d['personalData']['retention'] ?? [];
+            }
+        }
+        $sql = "SELECT f.id, f.title, COUNT(e.id) AS n, MIN(e.date_created) AS oldest FROM {$p}gf_form f
+            JOIN {$p}gf_entry e ON e.form_id = f.id AND e.status = 'active' GROUP BY f.id, f.title";
+        foreach ($wpdb->get_results($sql) as $f) {
+            $r = $meta[(int) $f->id] ?? [];
+            $wpda['retention']['forms'][] = [
+                'blog' => $blog,
+                'form_id' => (int) $f->id,
+                'title' => substr((string) $f->title, 0, 120),
+                'entries' => (int) $f->n,
+                'oldest' => (string) $f->oldest,
+                'policy' => (string) ($r['policy'] ?? 'retain'),
+                'days' => (int) ($r['retain_entries_days'] ?? 0),
+            ];
+        }
+    }
+    if (get_option('woocommerce_version') === false) {
+        return;
+    }
+    $hpos = get_option('woocommerce_custom_orders_table_enabled') === 'yes' && $has("{$p}wc_orders");
+    $row = $hpos
+        ? $wpdb->get_row("SELECT COUNT(*) AS n, MIN(date_created_gmt) AS oldest FROM {$p}wc_orders WHERE type = 'shop_order'")
+        : $wpdb->get_row("SELECT COUNT(*) AS n, MIN(post_date_gmt) AS oldest FROM {$wpdb->posts} WHERE post_type = 'shop_order'");
+    $settings = [];
+    foreach (['delete_inactive_accounts', 'trash_pending_orders', 'trash_failed_orders', 'trash_cancelled_orders', 'anonymize_refunded_orders', 'anonymize_completed_orders'] as $k) {
+        $v = get_option("woocommerce_{$k}");
+        $settings[$k] = is_array($v) && ! empty($v['number']) ? (int) $v['number'] . ' ' . (string) ($v['unit'] ?? '') : '';
+    }
+    $wpda['retention']['woo'][] = [
+        'blog' => $blog,
+        'orders' => (int) ($row->n ?? 0),
+        'oldest' => (string) ($row->oldest ?? ''),
+        'settings' => $settings,
+    ];
 });
 
 // Content. SQL prefilters with LIKE (one scan per table), PHP decodes and

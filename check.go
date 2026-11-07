@@ -54,6 +54,7 @@ type Site struct {
 	AllowedCountries []string        // ISO codes; empty skips the session country check
 	AllowedIPs       []string        // IPs or CIDR ranges never flagged, whatever their country
 	StaffDomains     []string        // email domains of the people who run the site
+	StaffEmails      []string        // the current staff's addresses; empty skips the leaver check
 	Accepted         map[string]bool // flag IDs a person accepted
 	// Pending are the last report's flags, ID → severity. A change caught by
 	// comparing with the previous snapshot (an option's new value, a new
@@ -100,7 +101,10 @@ var hostMuPlugins = map[string]bool{"kinsta-mu-plugins": true, "kinsta-mu-plugin
 // not yet accepted. exp nil skips the file comparison, geo nil the session
 // countries.
 func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
-	c := &checker{site: site}
+	c := &checker{site: site, staff: map[string]bool{}}
+	for _, e := range site.StaffEmails {
+		c.staff[strings.ToLower(strings.TrimSpace(e))] = true
+	}
 	for _, s := range site.AllowedIPs {
 		if p, err := netip.ParsePrefix(s); err == nil {
 			c.ips = append(c.ips, p)
@@ -118,6 +122,7 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 		c.note("the collector didn't run, so accounts, options and content weren't checked: only files")
 		c.files(cur, exp)
 		c.exposed(cur)
+		c.public(cur)
 		return c.sorted()
 	}
 	c.registration(cur)
@@ -128,6 +133,8 @@ func Check(prev, cur *Snapshot, site Site, exp *Repo, geo Geo) Report {
 		c.checksums(cur, exp)
 	}
 	c.exposed(cur)
+	c.public(cur)
+	c.retention(cur)
 	c.content(cur)
 	for _, e := range cur.Errors {
 		c.note("collector: " + e)
@@ -148,9 +155,10 @@ func (c *checker) sorted() Report {
 }
 
 type checker struct {
-	site Site
-	ips  []netip.Prefix
-	r    Report
+	site  Site
+	ips   []netip.Prefix
+	staff map[string]bool // StaffEmails, lowercased
+	r     Report
 }
 
 func (c *checker) allowedIP(ip string) bool {
@@ -267,6 +275,7 @@ func (c *checker) users(prev, cur *Snapshot, clients []string, geo Geo) {
 				Message: msg, Untrusted: who + ", registered " + u.Registered,
 			})
 			c.sessions(u, who, geo)
+			c.accounts(u, who, cur)
 		}
 		if len(u.ExtraCaps) > 0 {
 			caps := slices.Sorted(slices.Values(u.ExtraCaps))

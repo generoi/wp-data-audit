@@ -194,10 +194,14 @@ type Snapshot struct {
 	Content          []Match           `json:"content"`
 	ContentTruncated bool              `json:"content_truncated"`
 	Checksums        Checksums         `json:"checksums"`
+	Retention        Retention         `json:"retention"`
 	Errors           []string          `json:"errors"`
 	// Release is the hasher's file list, joined in by the caller (runner);
 	// nil when it didn't run.
 	Release *Release `json:"release,omitempty"`
+	// Public is what the site's public URLs give away (ProbePublic), joined
+	// in by the caller.
+	Public *Public `json:"public,omitempty"`
 	// NoCollector: the collector didn't run (the site's wp-cli failed), so
 	// only the hasher's files are judged. Such a snapshot isn't saved.
 	NoCollector bool `json:"-"`
@@ -261,6 +265,12 @@ type User struct {
 	ExtraCaps    []string      `json:"extra_caps"`
 	Sessions     []Session     `json:"sessions"`
 	AppPasswords []AppPassword `json:"app_passwords"`
+	LastActive   int64         `json:"last_active"` // WooCommerce's or a plugin's last-activity meta
+	Hash         string        `json:"hash"`        // the password hash's scheme: wp-bcrypt, phpass, md5, bcrypt, other
+	// LastSeen is the newest sign of the account being used: a session's
+	// login, LastActive, an application password's last use, or an earlier
+	// snapshot's LastSeen (CarryLastSeen), so a login seen once is kept.
+	LastSeen int64 `json:"last_seen,omitempty"`
 }
 
 type Session struct {
