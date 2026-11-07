@@ -1,9 +1,12 @@
 package audit
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,6 +40,7 @@ type SiteFacts struct {
 	Checksums        Checksums           `json:"checksums"`
 	Retention        RetentionFacts      `json:"retention"`
 	Timings          map[string]float64  `json:"timings"` // seconds per collector section
+	PeakMB           float64             `json:"peak_mb"` // the PHP process's peak memory, WordPress included
 	Errors           []string            `json:"errors"`
 }
 
@@ -216,16 +220,35 @@ type PublicSite struct {
 	CertExpiry time.Time `json:"cert_expiry,omitzero"`
 }
 
+// emptySHA is an empty file's sha256: an empty PHP file under uploads is a
+// directory guard, harmless.
+const emptySHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// maxLine is the longest output line read; a longer one is an error (a
+// path is at most 4 KB, the collector's JSON is read as a stream).
+const maxLine = 1 << 20
+
 // ParseSite reads the collector's output, ignoring anything printed around
 // it (wp-cli's notices, a shell's banner).
-func ParseSite(out []byte) (*SiteFacts, error) {
-	body, err := between(out, "collector")
-	if err != nil {
+func ParseSite(out []byte) (*SiteFacts, error) { return ReadSite(bytes.NewReader(out)) }
+
+// ReadSite reads the collector's output as it arrives: the JSON after
+// WPDA-BEGIN is decoded straight from r, never held whole as text.
+func ReadSite(r io.Reader) (*SiteFacts, error) {
+	br := bufio.NewReaderSize(r, 64<<10)
+	if err := skipTo(br, "WPDA-BEGIN", "collector"); err != nil {
 		return nil, err
 	}
+	dec := json.NewDecoder(br)
 	var s SiteFacts
-	if err := json.Unmarshal([]byte(body), &s); err != nil {
+	if err := dec.Decode(&s); err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, errors.New("collector output cut short")
+		}
 		return nil, fmt.Errorf("collector output: %w", err)
+	}
+	if err := skipTo(bufio.NewReader(io.MultiReader(dec.Buffered(), br)), "WPDA-END", "collector"); err != nil {
+		return nil, err
 	}
 	if s.Version != 1 {
 		return nil, fmt.Errorf("collector output version %d, want 1", s.Version)
@@ -233,19 +256,60 @@ func ParseSite(out []byte) (*SiteFacts, error) {
 	return &s, nil
 }
 
-// ParseFiles reads the hasher's output: keyword lines, sha256sum's under
-// FILES and SILENCE, and "DATA <size> <mtime> <path>".
-func ParseFiles(out []byte) (*FileFacts, error) {
-	body, err := between(out, "hasher")
-	if err != nil {
-		return nil, err
+// skipTo reads lines up to and including one that is marker (a CR or spaces
+// around it allowed), without keeping any: a line longer than the buffer is
+// read through, not grown into.
+func skipTo(br *bufio.Reader, marker, what string) error {
+	start := true
+	for {
+		line, err := br.ReadSlice('\n')
+		if start && string(bytes.TrimSpace(line)) == marker {
+			return nil
+		}
+		switch {
+		case errors.Is(err, bufio.ErrBufferFull):
+			start = false
+			continue
+		case err != nil:
+			return fmt.Errorf("no %s in the %s's output (cut short?)", marker, what)
+		}
+		start = true
+	}
+}
+
+// ParseFiles reads the hasher's output (ReadFiles).
+func ParseFiles(out []byte) (*FileFacts, error) { return ReadFiles(bytes.NewReader(out)) }
+
+// ReadFiles reads the hasher's output line by line as it arrives: keyword
+// lines, sha256sum's, "SILENT <path>" for directory guards (an older hasher's
+// SILENCE section too) and "DATA <size> <mtime> <path>".
+func ReadFiles(r io.Reader) (*FileFacts, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), maxLine)
+	begun := false
+	for sc.Scan() {
+		if sc.Text() == "WPDA-BEGIN" {
+			begun = true
+			break
+		}
+	}
+	if !begun {
+		return nil, scanErr(sc, "no WPDA-BEGIN in the hasher's output")
 	}
 	f := &FileFacts{Files: map[string]string{}, Silence: map[string]bool{}, Timings: map[string]float64{}}
-	version, section, last := 0, "", 0.0
-	for _, line := range strings.Split(body, "\n") {
+	version, section, last, ended := 0, "", 0.0, false
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "WPDA-END" {
+			ended = true
+			break
+		}
 		key, val, _ := strings.Cut(line, " ")
 		switch key {
 		case "":
+			continue
+		case "SILENT":
+			f.Silence[strings.TrimPrefix(strings.ReplaceAll(val, "//", "/"), "./")] = true
 			continue
 		case "VERSION":
 			version, _ = strconv.Atoi(val)
@@ -285,11 +349,17 @@ func ParseFiles(out []byte) (*FileFacts, error) {
 		switch {
 		case err != nil:
 			f.Errors = append(f.Errors, err.Error())
-		case section == "FILES":
-			f.Files[path] = sum
 		case section == "SILENCE":
 			f.Silence[path] = true
+		default:
+			f.Files[path] = sum
+			if sum == emptySHA && f.Content != "" && strings.HasPrefix(path, f.Content+"/uploads/") {
+				f.Silence[path] = true
+			}
 		}
+	}
+	if !ended {
+		return nil, scanErr(sc, "no WPDA-END in the hasher's output (cut short?)")
 	}
 	if version != 1 {
 		return nil, fmt.Errorf("hasher output version %d, want 1", version)
@@ -297,17 +367,13 @@ func ParseFiles(out []byte) (*FileFacts, error) {
 	return f, nil
 }
 
-// between is the body between the WPDA-BEGIN and WPDA-END markers.
-func between(out []byte, what string) (string, error) {
-	_, rest, ok := strings.Cut(string(out), "\nWPDA-BEGIN\n")
-	if !ok {
-		return "", fmt.Errorf("no WPDA-BEGIN in the %s's output", what)
+// scanErr is the scanner's error when it had one (a line over maxLine, a
+// failed read), else msg.
+func scanErr(sc *bufio.Scanner, msg string) error {
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("%s: %w", msg, err)
 	}
-	body, _, ok := strings.Cut(rest, "\nWPDA-END")
-	if !ok {
-		return "", errors.New("no WPDA-END in the " + what + "'s output (cut short?)")
-	}
-	return body, nil
+	return errors.New(msg)
 }
 
 var sumRE = regexp.MustCompile(`^\\?([0-9a-f]{64})  (.+)$`)

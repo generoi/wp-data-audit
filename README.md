@@ -151,12 +151,14 @@ last report, and the accepted flags with who accepted them and why.
 
 - `runner.Run` is one audit, the same for every caller. Give it a
   `runner.Transport`: how to pipe a script to the site's wp-cli (with
-  `audit.WPArgs`) and to a shell in its release (`audit.HasherCommand`).
+  `audit.WPArgs`) and to a shell in its release (`audit.HasherCommand`),
+  writing the output to the `io.Writer` it's handed as it arrives. The runner
+  parses while it's written and fails writes past `runner.MaxOutput`.
   Set `Target.Deployed` (`runner.DeployedCommit`) when the server has no
   `REVISION` file.
 - `store` is the state the CLI and foreman share: `Report`, `Decisions`,
   `Accepted` and `Accept`.
-- Underneath, `audit` holds the facts (`ParseSite`, `ParseFiles`), the
+- Underneath, `audit` holds the facts (`ReadSite`, `ReadFiles`), the
   checkout (`ReadRepo`, `HashInstall`) and the rules (`Check`, one file per
   check group); `web` asks the public URLs.
 

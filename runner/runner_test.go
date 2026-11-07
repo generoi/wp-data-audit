@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,8 +33,31 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func fixed(out string) func(context.Context, string) ([]byte, error) {
-	return func(context.Context, string) ([]byte, error) { return []byte(out), nil }
+func fixed(out string) func(context.Context, string, io.Writer) error {
+	return func(_ context.Context, _ string, w io.Writer) error { _, err := io.WriteString(w, out); return err }
+}
+
+// A script printing without end is cut at MaxOutput: the run fails that
+// source, and memory stays bounded.
+func TestRunCapsOutput(t *testing.T) {
+	e := newEnv(t)
+	site := target(t, "alpha")
+	endless := func(_ context.Context, _ string, w io.Writer) error {
+		chunk := []byte(strings.Repeat("x", 1<<20) + "\n")
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return err
+			}
+		}
+	}
+	rep := e.run(t, site, Transport{Collect: fixed(collected), Hash: endless}, nil)
+	var problems []string
+	for _, n := range rep.Problems() {
+		problems = append(problems, n.Text)
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "the hasher failed: output over 256 MB") {
+		t.Fatalf("problems %q", problems)
+	}
 }
 
 type env struct {
@@ -133,7 +157,7 @@ func TestPartialRun(t *testing.T) {
 func TestRunWithoutCollector(t *testing.T) {
 	e := newEnv(t)
 	site := target(t, "alpha")
-	failing := func(context.Context, string) ([]byte, error) { return nil, errors.New("PHP Fatal error") }
+	failing := func(context.Context, string, io.Writer) error { return errors.New("PHP Fatal error") }
 	rep := e.run(t, site, Transport{Collect: failing, Hash: fixed(hashed)}, nil)
 	var problems []string
 	for _, n := range rep.Problems() {
@@ -159,7 +183,7 @@ func TestRunNothingRan(t *testing.T) {
 func TestSkipNeedsNoCollector(t *testing.T) {
 	e := newEnv(t)
 	var calls atomic.Int32
-	collect := func(context.Context, string) ([]byte, error) { calls.Add(1); return []byte(collected), nil }
+	collect := func(ctx context.Context, s string, w io.Writer) error { calls.Add(1); return fixed(collected)(ctx, s, w) }
 	skip, err := audit.ParseSkip("files", "")
 	if err != nil {
 		t.Fatal(err)
@@ -175,10 +199,10 @@ func TestStopSavesNothing(t *testing.T) {
 	e := newEnv(t)
 	site := target(t, "alpha")
 	ctx, cancel := context.WithCancel(context.Background())
-	slow := func(ctx context.Context, _ string) ([]byte, error) {
+	slow := func(ctx context.Context, _ string, _ io.Writer) error {
 		cancel()
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 	_, err := Run(ctx, site, Transport{Collect: slow, Hash: slow}, Options{Client: offline, Store: e.st, Config: e.cfg})
 	if err == nil || !strings.Contains(err.Error(), "nothing saved") {

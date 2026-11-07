@@ -3,15 +3,20 @@ package audit
 import (
 	"cmp"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 // ContentDir is where a Bedrock repo keeps plugins, mu-plugins and drop-ins.
@@ -215,38 +220,76 @@ var phpFile = regexp.MustCompile(`(?i)\.(php\d?|phtml|phar|pht|phps|inc)$`)
 
 // hashTree hashes a composer install's PHP files the way hasher.sh does on
 // the server: core, vendor and the content dir, not uploads or Composer's
-// generated autoloaders, symlinked folders not followed.
+// generated autoloaders, symlinked folders not followed. The walk feeds a few
+// workers that stream each file through the hash with a buffer of their own,
+// so no file is ever read whole into memory.
 func hashTree(dir string) (map[string]string, error) {
-	files := map[string]string{}
-	for _, root := range []string{ContentDir, "vendor", "web/wp"} {
-		err := filepath.WalkDir(filepath.Join(dir, root), func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					return nil
+	paths := make(chan string, 256)
+	var walkErr error
+	go func() {
+		defer close(paths)
+		for _, root := range []string{ContentDir, "vendor", "web/wp"} {
+			walkErr = filepath.WalkDir(filepath.Join(dir, root), func(p string, d fs.DirEntry, err error) error {
+				if err != nil {
+					if errors.Is(err, fs.ErrNotExist) {
+						return nil
+					}
+					return err
 				}
-				return err
-			}
-			rel, _ := filepath.Rel(dir, p)
-			rel = filepath.ToSlash(rel)
-			if d.IsDir() && (rel == ContentDir+"/uploads" || rel == "vendor/composer") {
-				return filepath.SkipDir
-			}
-			if !d.Type().IsRegular() || !phpFile.MatchString(d.Name()) {
+				rel, _ := filepath.Rel(dir, p)
+				rel = filepath.ToSlash(rel)
+				if d.IsDir() && (rel == ContentDir+"/uploads" || rel == "vendor/composer") {
+					return filepath.SkipDir
+				}
+				if d.Type().IsRegular() && phpFile.MatchString(d.Name()) {
+					paths <- rel
+				}
 				return nil
+			})
+			if walkErr != nil {
+				return
 			}
-			b, err := os.ReadFile(p)
-			if err != nil {
-				return err
-			}
-			sum := sha256.Sum256(b)
-			files[rel] = fmt.Sprintf("%x", sum)
-			return nil
-		})
-		if err != nil {
-			return nil, err
 		}
+	}()
+
+	files := map[string]string{}
+	var mu sync.Mutex
+	var hashErr error
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), 8) {
+		wg.Go(func() {
+			buf := make([]byte, 64<<10)
+			h := sha256.New()
+			for rel := range paths {
+				sum, err := hashFile(filepath.Join(dir, filepath.FromSlash(rel)), h, buf)
+				mu.Lock()
+				if err != nil && hashErr == nil {
+					hashErr = err
+				}
+				files[rel] = sum
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if err := cmp.Or(walkErr, hashErr); err != nil {
+		return nil, err
 	}
 	return files, nil
+}
+
+// hashFile is a file's sha256 in hex, h and buf reused between files.
+func hashFile(path string, h hash.Hash, buf []byte) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h.Reset()
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(buf[:0])), nil
 }
 
 type lockPackage struct {

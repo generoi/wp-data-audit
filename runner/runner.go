@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"os"
@@ -70,13 +71,60 @@ type Target struct {
 func (t Target) Key() store.Key { return store.Key{Site: t.Site, Env: t.Env} }
 
 // Transport reaches the site. A nil func can't: its source doesn't run, and
-// the checks needing it say so.
+// the checks needing it say so. Each func writes the script's output to out
+// as it comes (the runner parses it meanwhile, nothing held whole) and
+// returns when the script has ended; a write error means stop: the output
+// passed MaxOutput, or the run was stopped.
 type Transport struct {
 	// Collect pipes the collector script to the site's wp-cli with
-	// audit.WPArgs and returns its output.
-	Collect func(ctx context.Context, script string) ([]byte, error)
+	// audit.WPArgs.
+	Collect func(ctx context.Context, script string, out io.Writer) error
 	// Hash pipes audit.Hasher to audit.HasherCommand in the release.
-	Hash func(ctx context.Context, script string) ([]byte, error)
+	Hash func(ctx context.Context, script string, out io.Writer) error
+}
+
+// MaxOutput is the most a script may print: far above any real site's
+// (a large multisite's hasher prints about 2 MB), low enough that a site
+// printing without end can't fill memory.
+const MaxOutput = 256 << 20
+
+// stream runs send with a writer feeding read, as a pipe: read parses while
+// send writes, and send's writes fail past MaxOutput. What read leaves unread
+// is drained, so send never blocks on it.
+func stream[T any](ctx context.Context, send func(context.Context, io.Writer) error, read func(io.Reader) (T, error)) (T, error) {
+	pr, pw := io.Pipe()
+	type parsed struct {
+		v   T
+		err error
+	}
+	got := make(chan parsed, 1)
+	go func() {
+		v, err := read(pr)
+		io.Copy(io.Discard, pr)
+		got <- parsed{v, err}
+	}()
+	err := send(ctx, &capped{w: pw, left: MaxOutput})
+	pw.CloseWithError(err) // nil: the reader sees EOF
+	p := <-got
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return p.v, p.err
+}
+
+// capped fails writes past left bytes.
+type capped struct {
+	w    io.Writer
+	left int64
+}
+
+func (c *capped) Write(b []byte) (int, error) {
+	if int64(len(b)) > c.left {
+		return 0, fmt.Errorf("output over %d MB", MaxOutput>>20)
+	}
+	c.left -= int64(len(b))
+	return c.w.Write(b)
 }
 
 // Options are a run's choices; zero values are the defaults.
@@ -93,6 +141,7 @@ type Result struct {
 	Report    audit.Report
 	Timings   []Timing
 	Collector map[string]float64 // seconds per collector section
+	PeakMB    float64            // the collector's peak memory on the site
 	Hasher    map[string]float64 // seconds per hasher section
 }
 
@@ -135,7 +184,7 @@ func Run(ctx context.Context, t Target, tr Transport, o Options) (Result, error)
 	}
 	res := Result{Report: rep, Timings: r.timings}
 	if facts.Site != nil {
-		res.Collector = facts.Site.Timings
+		res.Collector, res.PeakMB = facts.Site.Timings, facts.Site.PeakMB
 	}
 	if facts.Files != nil {
 		res.Hasher = facts.Files.Timings
@@ -275,12 +324,8 @@ func (r *run) collect(ctx context.Context, script string) *audit.SiteFacts {
 		return nil
 	}
 	start := time.Now()
-	out, err := r.tr.Collect(ctx, script)
+	s, err := stream(ctx, func(ctx context.Context, w io.Writer) error { return r.tr.Collect(ctx, script, w) }, audit.ReadSite)
 	r.time("collector", start)
-	var s *audit.SiteFacts
-	if err == nil {
-		s, err = audit.ParseSite(out)
-	}
 	if err != nil && ctx.Err() == nil {
 		r.problem("the collector failed: %v", err)
 	}
@@ -298,12 +343,8 @@ func (r *run) hash(ctx context.Context) *audit.FileFacts {
 		return nil
 	}
 	start := time.Now()
-	out, err := r.tr.Hash(ctx, audit.Hasher)
+	f, err := stream(ctx, func(ctx context.Context, w io.Writer) error { return r.tr.Hash(ctx, audit.Hasher, w) }, audit.ReadFiles)
 	r.time("hasher", start)
-	var f *audit.FileFacts
-	if err == nil {
-		f, err = audit.ParseFiles(out)
-	}
 	if err != nil {
 		if ctx.Err() == nil {
 			r.problem("the hasher failed: %v", err)

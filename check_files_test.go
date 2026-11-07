@@ -199,6 +199,32 @@ func TestParseFiles(t *testing.T) {
 	}
 }
 
+// The current hasher's one uploads walk: guards as SILENT lines, empty PHP
+// files known by their hash (only under uploads), lines in any order.
+func TestParseFilesOneWalk(t *testing.T) {
+	h := strings.Repeat("a", 64)
+	out := "\nWPDA-BEGIN\nVERSION 1\nCONTENT web/app\nFILES\n" +
+		emptySHA + "  web/app/plugins/p/empty.php\n" +
+		"DATA 5 1551900000 web/app/uploads/a.sql\n" +
+		"SILENT web/app/uploads//guard.php\n" +
+		h + "  web/app/uploads/guard.php\n" +
+		emptySHA + "  web/app/uploads/2020/index.php\n" +
+		"TIME uploads 2.5\nWPDA-END\n"
+	f, err := ReadFiles(strings.NewReader(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.Silence["web/app/uploads/guard.php"] || !f.Silence["web/app/uploads/2020/index.php"] || f.Silence["web/app/plugins/p/empty.php"] {
+		t.Fatalf("silence %v", f.Silence)
+	}
+	if len(f.Files) != 3 || len(f.Data) != 1 {
+		t.Fatalf("files %v data %v", f.Files, f.Data)
+	}
+	if _, err := ReadFiles(strings.NewReader("\nWPDA-BEGIN\n" + strings.Repeat("x", maxLine+1) + "\nWPDA-END\n")); err == nil {
+		t.Fatal("read a line over maxLine")
+	}
+}
+
 func TestScriptAndParseSite(t *testing.T) {
 	s, err := Script(map[string][]string{"members.example": {"subscriber"}, "3": {"member"}}, SectionContent, SectionChecksums)
 	if err != nil {

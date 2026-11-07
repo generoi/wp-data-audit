@@ -6,9 +6,11 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -41,10 +43,18 @@ type Options struct {
 	Public bool
 }
 
+// concurrency is how many requests a probe has in flight at once, so a site
+// is asked politely; the client keeps as many connections open per host, so
+// each request after the first reuses one instead of a new TLS handshake.
+const concurrency = 6
+
 // NewClient is the default client: no redirects (a redirect isn't the file),
-// short timeouts.
+// short timeouts, connections kept for reuse.
 func NewClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = concurrency
 	return &http.Client{
+		Transport:     tr,
 		Timeout:       15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
@@ -62,14 +72,18 @@ func Probe(ctx context.Context, client *http.Client, t Target, o Options) *audit
 	if client == nil {
 		client = NewClient()
 	}
-	p := &prober{ctx: ctx, client: client, t: t, base: base, blogs: BlogURLs(base, t.Options), sem: make(chan struct{}, 6)}
+	p := &prober{ctx: ctx, client: client, t: t, base: base, blogs: BlogURLs(base, t.Options), sem: make(chan struct{}, concurrency)}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	set := func(f func()) { mu.Lock(); f(); mu.Unlock() }
-	for _, f := range o.Files {
-		p.spawn(&wg, func() {
-			a := p.file(f)
-			set(func() { w.Files[f] = a })
+	// One goroutine per request at most concurrency at a time (do holds the
+	// limit), started as slots free up rather than all at once.
+	work := make(chan func())
+	for range concurrency {
+		wg.Go(func() {
+			for f := range work {
+				f()
+			}
 		})
 	}
 	dirs := map[string]bool{}
@@ -78,12 +92,21 @@ func Probe(ctx context.Context, client *http.Client, t Target, o Options) *audit
 			dirs[path.Dir(f)] = true
 		}
 	}
-	for d := range dirs {
-		p.spawn(&wg, func() {
-			listed, err := p.listed(p.url(d) + "/")
-			set(func() { w.Listings[d] = audit.Listing{Listed: listed, Err: err} })
-		})
-	}
+	go func() {
+		defer close(work)
+		for _, f := range o.Files {
+			work <- func() {
+				a := p.file(f)
+				set(func() { w.Files[f] = a })
+			}
+		}
+		for d := range dirs {
+			work <- func() {
+				listed, err := p.listed(p.url(d) + "/")
+				set(func() { w.Listings[d] = audit.Listing{Listed: listed, Err: err} })
+			}
+		}
+	}()
 	if o.Public {
 		sites := SiteURLs(t.Options)
 		homes := slices.Sorted(maps.Keys(sites))
@@ -105,16 +128,7 @@ type prober struct {
 	t      Target
 	base   string
 	blogs  map[string]string
-	sem    chan struct{} // at most six requests at once
-}
-
-// spawn runs f in wg, within the request limit.
-func (p *prober) spawn(wg *sync.WaitGroup, f func()) {
-	wg.Go(func() {
-		p.sem <- struct{}{}
-		defer func() { <-p.sem }()
-		f()
-	})
+	sem    chan struct{} // at most concurrency requests at once, every kind
 }
 
 // url is path p's public URL: on its multisite site's own domain for its
@@ -154,15 +168,15 @@ func (p *prober) file(rel string) audit.Answer {
 }
 
 func (p *prober) head(u string) audit.Answer {
-	resp, err := p.do(http.MethodHead, u, nil)
+	resp, err := p.do(http.MethodHead, u, nil, 0)
 	if err == nil && (resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented) {
-		resp.Body.Close()
-		resp, err = p.do(http.MethodGet, u, nil)
+		done(resp)
+		resp, err = p.do(http.MethodGet, u, nil, 1)
 	}
 	if err != nil {
 		return audit.Answer{Err: errText(err)}
 	}
-	resp.Body.Close()
+	done(resp)
 	return audit.Answer{Status: resp.StatusCode, Type: resp.Header.Get("Content-Type")}
 }
 
@@ -171,12 +185,12 @@ var indexRE = regexp.MustCompile(`(?i)<title>\s*index of|<h1>\s*index of`)
 // listed GETs a folder URL and looks for a directory listing in its first
 // 8 KB; nothing of it is kept.
 func (p *prober) listed(u string) (bool, string) {
-	resp, err := p.do(http.MethodGet, u, nil)
+	resp, err := p.do(http.MethodGet, u, nil, 8<<10)
 	if err != nil {
 		return false, errText(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	defer done(resp)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return false, ""
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
@@ -190,18 +204,20 @@ var authorRE = regexp.MustCompile(`/author/([^/?#]+)`)
 // system.listMethods) and the uploads folder's listing.
 func (p *prober) site(home, siteurl string) audit.PublicSite {
 	s := audit.PublicSite{Home: home}
-	resp, err := p.do(http.MethodGet, home+"/", nil)
+	// The whole landing page, not a range: some servers add security headers
+	// only to full answers. Only its headers are read.
+	resp, err := p.do(http.MethodGet, home+"/", nil, 0)
 	if err == nil && resp.StatusCode/100 == 3 { // http → https, or to www: the headers are the landing page's
-		resp.Body.Close()
+		done(resp)
 		if loc, lerr := resp.Request.URL.Parse(resp.Header.Get("Location")); lerr == nil && !reserved(loc.String()) {
-			resp, err = p.do(http.MethodGet, loc.String(), nil)
+			resp, err = p.do(http.MethodGet, loc.String(), nil, 0)
 		}
 	}
 	if err != nil {
 		s.Err = errText(err)
 		return s
 	}
-	resp.Body.Close()
+	done(resp)
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		s.CertExpiry = resp.TLS.PeerCertificates[0].NotAfter
 	}
@@ -215,22 +231,28 @@ func (p *prober) site(home, siteurl string) audit.PublicSite {
 	if !strings.EqualFold(h.Get("X-Content-Type-Options"), "nosniff") {
 		s.Headers = append(s.Headers, "X-Content-Type-Options")
 	}
-	if resp, err := p.do(http.MethodGet, home+"/wp-json/wp/v2/users", nil); err == nil {
-		var users []struct {
-			Slug string `json:"slug"`
-		}
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && json.Unmarshal(b, &users) == nil {
-			for _, u := range users {
-				if u.Slug != "" && len(s.Users) < 20 {
-					s.Users = append(s.Users, firstN(u.Slug, 60))
+	// The user list is decoded as it arrives, its first 20 slugs kept.
+	if resp, err := p.do(http.MethodGet, home+"/wp-json/wp/v2/users", nil, 0); err == nil {
+		if resp.StatusCode == http.StatusOK {
+			dec := json.NewDecoder(io.LimitReader(resp.Body, 256<<10))
+			if t, err := dec.Token(); err == nil && t == json.Delim('[') {
+				for dec.More() && len(s.Users) < 20 {
+					var u struct {
+						Slug string `json:"slug"`
+					}
+					if dec.Decode(&u) != nil {
+						break
+					}
+					if u.Slug != "" {
+						s.Users = append(s.Users, firstN(u.Slug, 60))
+					}
 				}
 			}
 		}
+		done(resp)
 	}
-	if resp, err := p.do(http.MethodGet, home+"/?author=1", nil); err == nil {
-		resp.Body.Close()
+	if resp, err := p.do(http.MethodGet, home+"/?author=1", nil, 1); err == nil {
+		done(resp)
 		if m := authorRE.FindStringSubmatch(resp.Header.Get("Location")); resp.StatusCode/100 == 3 && m != nil {
 			s.AuthorSlug = firstN(m[1], 60)
 		}
@@ -239,10 +261,10 @@ func (p *prober) site(home, siteurl string) audit.PublicSite {
 		siteurl = home
 	}
 	body := `<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>`
-	if resp, err := p.do(http.MethodPost, siteurl+"/xmlrpc.php", strings.NewReader(body)); err == nil {
+	if resp, err := p.do(http.MethodPost, siteurl+"/xmlrpc.php", strings.NewReader(body), 0); err == nil {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		resp.Body.Close()
-		s.XMLRPC = resp.StatusCode == http.StatusOK && strings.Contains(string(b), "wp.getUsersBlogs")
+		done(resp)
+		s.XMLRPC = resp.StatusCode == http.StatusOK && bytes.Contains(b, []byte("wp.getUsersBlogs"))
 	}
 	uploads := home + "/wp-content/uploads/"
 	if p.t.bedrock() {
@@ -252,9 +274,10 @@ func (p *prober) site(home, siteurl string) audit.PublicSite {
 	return s
 }
 
-// do sends one request: a one-byte GET (Range) for GET, XML-RPC's text/xml
-// for a POST with a body.
-func (p *prober) do(method, u string, body io.Reader) (*http.Response, error) {
+// do sends one request within the probe's limit: a GET asks for its first n
+// bytes only (Range) when n > 0, so a 2 GB dump isn't sent to be thrown away;
+// a POST with a body is XML-RPC's text/xml.
+func (p *prober) do(method, u string, body io.Reader, n int64) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(p.ctx, method, u, body)
 	if err != nil {
 		return nil, err
@@ -263,7 +286,23 @@ func (p *prober) do(method, u string, body io.Reader) (*http.Response, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "text/xml")
 	}
+	if method == http.MethodGet && n > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", n-1))
+	}
+	select {
+	case p.sem <- struct{}{}:
+	case <-p.ctx.Done():
+		return nil, context.Cause(p.ctx)
+	}
+	defer func() { <-p.sem }()
 	return p.client.Do(req)
+}
+
+// done closes a response, first reading what's left of a short body so its
+// connection goes back to the pool; a long one is cut (the connection with it).
+func done(resp *http.Response) {
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 16<<10))
+	resp.Body.Close()
 }
 
 // reservedRE are names that are never a real site (RFC 2606, 6761).

@@ -18,6 +18,37 @@
 
 global $wpdb;
 
+// The lowest CPU priority: the site's visitors come first. (The database
+// server's own work can't be lowered from here; the queries below keep it
+// small: paged, each page forgotten before the next.)
+function_exists('proc_nice') && @proc_nice(19);
+
+// Each page of rows is handed to $each, then dropped (wpdb keeps a copy of
+// the last result otherwise), so memory holds one page whatever the table's
+// size. Keyset paging by a unique, indexed $key: each page continues where
+// the last ended, so the table is read once in all.
+$wpda_pages = function (string $sql, string $key, int $page, callable $each, int $max = PHP_INT_MAX) use ($wpdb): ?string {
+    $last = 0;
+    $seen = 0;
+    while ($seen < $max) {
+        $rows = $wpdb->get_results("{$sql} AND {$key} > {$last} ORDER BY {$key} LIMIT {$page}");
+        if ($wpdb->last_error) {
+            return $wpdb->last_error;
+        }
+        foreach ($rows as $r) {
+            $each($r);
+            $last = (int) $r->wpda_k;
+        }
+        $seen += count($rows);
+        $wpdb->flush();
+        if (count($rows) < $page) {
+            return null;
+        }
+    }
+
+    return 'truncated';
+};
+
 $wpda_public_roles = isset($wpda_public_roles) && is_array($wpda_public_roles) ? $wpda_public_roles : [];
 $wpda_public = function (int $blog) use ($wpda_public_roles): array {
     $host = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
@@ -29,7 +60,7 @@ $wpda_public = function (int $blog) use ($wpda_public_roles): array {
     return $roles;
 };
 $wpda_errors = [];
-$wpda_rows = 2000;    // per content query; reaching it marks the scan truncated
+$wpda_rows = 20000;   // candidate rows per content table (read 100 at a time); reaching it marks the scan truncated
 $wpda_max = 500;      // matches, upload files
 
 // On a multisite, per-site facts (options, roles, content, WooCommerce keys)
@@ -93,7 +124,7 @@ $wpda_privileged = [];
 $wpda_detail = [];
 $wpda_counts = [];
 $wpda_public_caps = [];
-$wpda_each(function (int $blog) use ($wpdb, $wpda_tag, $wpda_public, &$wpda_user_roles, &$wpda_privileged, &$wpda_detail, &$wpda_counts, &$wpda_public_caps) {
+$wpda_each(function (int $blog) use ($wpdb, $wpda_tag, $wpda_public, $wpda_pages, &$wpda_errors, &$wpda_user_roles, &$wpda_privileged, &$wpda_detail, &$wpda_counts, &$wpda_public_caps) {
     $site_roles = wp_roles();
     $public = $wpda_public($blog);
     // Role definitions are data too: a public role that grants more than
@@ -103,7 +134,9 @@ $wpda_each(function (int $blog) use ($wpdb, $wpda_tag, $wpda_public, &$wpda_user
         $wpda_public_caps[$wpda_tag($blog, $r)] = $role ? array_keys(array_filter($role->capabilities)) : [];
     }
     $capkey = $wpdb->get_blog_prefix() . 'capabilities';
-    foreach ($wpdb->get_results($wpdb->prepare("SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = %s", $capkey)) as $row) {
+    // A shop's customers can be hundreds of thousands of rows: paged.
+    $sql = $wpdb->prepare("SELECT umeta_id AS wpda_k, user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = %s", $capkey);
+    $err = $wpda_pages($sql, 'umeta_id', 5000, function ($row) use ($blog, $site_roles, $public, $wpda_tag, &$wpda_user_roles, &$wpda_privileged, &$wpda_detail, &$wpda_counts) {
         $caps = maybe_unserialize($row->meta_value);
         $roles = [];
         $extra = [];
@@ -132,6 +165,9 @@ $wpda_each(function (int $blog) use ($wpdb, $wpda_tag, $wpda_public, &$wpda_user
             $wpda_detail[$id] ??= ['extra_caps' => [], 'app_passwords' => []];
             array_push($wpda_detail[$id]['extra_caps'], ...$extra);
         }
+    });
+    if ($err !== null) {
+        $wpda_errors[] = "users of blog {$blog}: {$err}";
     }
 });
 if (is_multisite()) {
@@ -427,46 +463,75 @@ $wpda_like = function (array $cols) use ($wpdb, $wpda_patterns): string {
 
     return '(' . implode(' OR ', $or) . ')';
 };
-$wpda_query = function (string $sql, array $cols) use ($wpdb, &$wpda, $wpda_rows, &$wpda_errors, $wpda_regexp, $wpda_like): array {
-    $rows = $wpdb->get_results($sql . $wpda_regexp($cols) . " LIMIT {$wpda_rows}");
-    if ($wpdb->last_error) {
-        $rows = $wpdb->get_results($sql . $wpda_like($cols) . " LIMIT {$wpda_rows}");
+// Candidate rows, streamed: an unbuffered query hands PHP one row at a time
+// from one scan of the table (meta and post values can be megabytes each),
+// up to $wpda_rows per table. Safe because matching a row runs no query.
+// Without mysqli (a drop-in database driver) they're paged instead.
+$wpda_stream = function (string $sql, string $key, callable $each, int $max) use ($wpdb, $wpda_pages): ?string {
+    if (! ($wpdb->dbh instanceof mysqli)) {
+        return $wpda_pages($sql, $key, 100, $each, $max);
     }
-    if ($wpdb->last_error) {
-        $wpda_errors[] = 'content query: ' . $wpdb->last_error;
+    $sql = $wpdb->remove_placeholder_escape($sql) . ' LIMIT ' . ($max + 1);
+    try {
+        $res = mysqli_query($wpdb->dbh, $sql, MYSQLI_USE_RESULT);
+    } catch (Throwable $e) {
+        return $e->getMessage();
     }
-    if (count($rows) >= $wpda_rows) {
-        $wpda['content_truncated'] = true;
+    if ($res === false) {
+        return mysqli_error($wpdb->dbh);
     }
+    $n = 0;
+    while ($r = mysqli_fetch_object($res)) {
+        if (++$n > $max) {
+            break;
+        }
+        $each($r);
+    }
+    mysqli_free_result($res); // reads off any rows left, freeing the connection
 
-    return $rows;
+    return $n > $max ? 'truncated' : null;
+};
+$wpda_like_only = false;
+$wpda_query = function (string $sql, string $key, array $cols, callable $each) use (&$wpda, $wpda_rows, &$wpda_errors, $wpda_regexp, $wpda_like, $wpda_stream, &$wpda_like_only) {
+    $err = $wpda_like_only ? 'regexp' : $wpda_stream($sql . $wpda_regexp($cols), $key, $each, $wpda_rows);
+    if ($err !== null && $err !== 'truncated' && ! $wpda_like_only) {
+        $wpda_like_only = true; // the REGEXP failed before any row: nothing handed over twice
+    }
+    if ($wpda_like_only) {
+        $err = $wpda_stream($sql . $wpda_like($cols), $key, $each, $wpda_rows);
+    }
+    if ($err === 'truncated') {
+        $wpda['content_truncated'] = true;
+    } elseif ($err !== null) {
+        $wpda_errors[] = 'content query: ' . $err;
+    }
 };
 
 empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpda_query, $wpda_record, &$wpda_self, &$wpda_cur_blog) {
     $wpda_cur_blog = $blog;
     $wpda_self = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
-    foreach ($wpda_query("SELECT ID, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND ", ['post_title', 'post_content', 'post_excerpt']) as $r) {
-        $wpda_record('posts', (int) $r->ID, 'post_title', '', $r->post_title);
-        $wpda_record('posts', (int) $r->ID, 'post_content', '', $r->post_content);
-        $wpda_record('posts', (int) $r->ID, 'post_excerpt', '', $r->post_excerpt);
-    }
+    $wpda_query("SELECT ID AS wpda_k, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND ", 'ID', ['post_title', 'post_content', 'post_excerpt'], function ($r) use ($wpda_record) {
+        $wpda_record('posts', (int) $r->wpda_k, 'post_title', '', $r->post_title);
+        $wpda_record('posts', (int) $r->wpda_k, 'post_content', '', $r->post_content);
+        $wpda_record('posts', (int) $r->wpda_k, 'post_excerpt', '', $r->post_excerpt);
+    });
     // _oembed_* is WordPress's cache of embed HTML for URLs already in content.
-    foreach ($wpda_query("SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_oembed\\_%' AND ", ['meta_value']) as $r) {
+    $wpda_query("SELECT meta_id AS wpda_k, post_id, meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_oembed\\_%' AND ", 'meta_id', ['meta_value'], function ($r) use ($wpda_record) {
         $wpda_record('postmeta', (int) $r->post_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
-    }
-    foreach ($wpda_query("SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' AND ", ['option_value']) as $r) {
+    });
+    $wpda_query("SELECT option_id AS wpda_k, option_name, option_value FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient\\_%' AND option_name NOT LIKE '\\_site\\_transient\\_%' AND ", 'option_id', ['option_value'], function ($r) use ($wpda_record) {
         $wpda_record('options', 0, 'option_value', (string) $r->option_name, $r->option_value);
-    }
-    foreach ($wpda_query("SELECT t.term_id, t.name, tt.description FROM {$wpdb->terms} t JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id WHERE ", ['t.name', 'tt.description']) as $r) {
+    });
+    $wpda_query("SELECT tt.term_taxonomy_id AS wpda_k, t.term_id, t.name, tt.description FROM {$wpdb->terms} t JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id WHERE ", 'tt.term_taxonomy_id', ['t.name', 'tt.description'], function ($r) use ($wpda_record) {
         $wpda_record('terms', (int) $r->term_id, 'name', '', $r->name);
         $wpda_record('terms', (int) $r->term_id, 'description', '', $r->description);
-    }
-    foreach ($wpda_query("SELECT term_id, meta_key, meta_value FROM {$wpdb->termmeta} WHERE ", ['meta_value']) as $r) {
+    });
+    $wpda_query("SELECT meta_id AS wpda_k, term_id, meta_key, meta_value FROM {$wpdb->termmeta} WHERE ", 'meta_id', ['meta_value'], function ($r) use ($wpda_record) {
         $wpda_record('termmeta', (int) $r->term_id, 'meta_value', (string) $r->meta_key, $r->meta_value);
-    }
-    foreach ($wpda_query("SELECT comment_ID, comment_content FROM {$wpdb->comments} WHERE comment_approved = '1' AND ", ['comment_content']) as $r) {
-        $wpda_record('comments', (int) $r->comment_ID, 'comment_content', '', $r->comment_content);
-    }
+    });
+    $wpda_query("SELECT comment_ID AS wpda_k, comment_content FROM {$wpdb->comments} WHERE comment_approved = '1' AND ", 'comment_ID', ['comment_content'], function ($r) use ($wpda_record) {
+        $wpda_record('comments', (int) $r->wpda_k, 'comment_content', '', $r->comment_content);
+    });
 });
 $wpda['content'] = array_values($wpda_hits);
 if ($wpda_pcre > 0) {
@@ -510,4 +575,5 @@ if (empty($wpda_skip['checksums'])) {
 $wpda_timed('checksums');
 
 $wpda['errors'] = $wpda_errors;
+$wpda['peak_mb'] = round(memory_get_peak_usage(true) / 1048576, 1); // WordPress's own share included
 echo "\nWPDA-BEGIN\n" . wp_json_encode($wpda, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . "\nWPDA-END\n";

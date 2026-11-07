@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -178,6 +177,9 @@ func auditSite(args []string) error {
 		for _, s := range slices.Sorted(maps.Keys(res.Collector)) {
 			fmt.Fprintf(os.Stderr, "%8.1fs    collector: %s\n", res.Collector[s], s)
 		}
+		if res.PeakMB > 0 {
+			fmt.Fprintf(os.Stderr, "%7.1fMB  collector: peak memory on the site\n", res.PeakMB)
+		}
 		for _, s := range slices.Sorted(maps.Keys(res.Hasher)) {
 			fmt.Fprintf(os.Stderr, "%8.1fs    hasher: %s\n", res.Hasher[s], s)
 		}
@@ -209,34 +211,34 @@ func transport(t runner.Target, wp, shell, collectorIn, hasherIn string) runner.
 	var tr runner.Transport
 	switch {
 	case collectorIn != "":
-		tr.Collect = func(context.Context, string) ([]byte, error) { return readInput(collectorIn) }
+		tr.Collect = func(_ context.Context, _ string, out io.Writer) error { return copyInput(collectorIn, out) }
 	default:
 		argv := []string{"vendor/bin/wp", "@" + t.Env}
 		if wp != "" {
 			argv = strings.Fields(wp)
 		}
 		argv = append(argv, audit.WPArgs...)
-		tr.Collect = func(ctx context.Context, script string) ([]byte, error) {
-			out, err := pipe(ctx, t.Repo, argv, script)
+		tr.Collect = func(ctx context.Context, script string, out io.Writer) error {
+			err := pipe(ctx, t.Repo, argv, script, out)
 			if err != nil {
 				err = fmt.Errorf("%w (if the site's wp-cli runs the wrong PHP, set bin_path for the alias in wp-cli.yml to the right php's folder: php_path only works where the release's vendor/bin/wp can execute)", err)
 			}
-			return out, err
+			return err
 		}
 	}
 	switch {
 	case hasherIn != "":
-		tr.Hash = func(context.Context, string) ([]byte, error) { return readInput(hasherIn) }
+		tr.Hash = func(_ context.Context, _ string, out io.Writer) error { return copyInput(hasherIn, out) }
 	case shell != "":
 		argv := strings.Fields(shell)
-		tr.Hash = func(ctx context.Context, script string) ([]byte, error) { return pipe(ctx, t.Repo, argv, script) }
+		tr.Hash = func(ctx context.Context, script string, out io.Writer) error { return pipe(ctx, t.Repo, argv, script, out) }
 	case wp == "":
 		argv, err := aliasSSH(t.Repo, t.Env)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "wp-data-audit: hasher:", err)
 			break
 		}
-		tr.Hash = func(ctx context.Context, script string) ([]byte, error) { return pipe(ctx, t.Repo, argv, script) }
+		tr.Hash = func(ctx context.Context, script string, out io.Writer) error { return pipe(ctx, t.Repo, argv, script, out) }
 	}
 	return tr
 }
@@ -276,28 +278,52 @@ func aliasSSH(repo, env string) ([]string, error) {
 	return nil, fmt.Errorf("wp-cli.yml has no ssh for @%s", env)
 }
 
-// readInput is a saved script output: a file, or stdin for "-".
-func readInput(path string) ([]byte, error) {
-	if path == "-" {
-		return io.ReadAll(os.Stdin)
+// copyInput copies a saved script output to out: a file, or stdin for "-".
+func copyInput(path string, out io.Writer) error {
+	in := os.Stdin
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		in = f
 	}
-	return os.ReadFile(path)
+	_, err := io.Copy(out, in)
+	return err
 }
 
-// pipe pipes script to argv in dir and returns its stdout. When ctx ends (a
-// signal) the command gets SIGTERM, then SIGKILL after ten seconds: ssh then
-// closes the session and the remote script ends with it.
-func pipe(ctx context.Context, dir string, argv []string, script string) ([]byte, error) {
+// pipe pipes script to argv in dir, its stdout to out as it comes. When ctx
+// ends (a signal) the command gets SIGTERM, then SIGKILL after ten seconds:
+// ssh then closes the session and the remote script ends with it. A failed
+// write to out (over the runner's cap) ends the command the same way.
+func pipe(ctx context.Context, dir string, argv []string, script string, out io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 10 * time.Second
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(script)
-	var out bytes.Buffer
-	cmd.Stdout = &out
+	cmd.Stdout = &stopOnError{w: out, stop: cancel}
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+		return fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
 	}
-	return out.Bytes(), nil
+	return nil
+}
+
+// stopOnError cancels the command when a write fails, rather than leaving
+// it to run until its own stdout's pipe fills.
+type stopOnError struct {
+	w    io.Writer
+	stop func()
+}
+
+func (s *stopOnError) Write(b []byte) (int, error) {
+	n, err := s.w.Write(b)
+	if err != nil {
+		s.stop()
+	}
+	return n, err
 }
