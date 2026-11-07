@@ -121,9 +121,14 @@ SIGTERM and SIGHUP stop both scripts (ssh then ends the remote side) and
 save nothing; state files are written atomically and the state lock is a
 `flock`, so a killed run leaves no damage.
 
-What's true for one site lives in its repo, in `data-audit.json` at the root
-(not composer.json: Composer's lock hash covers `extra`). `public_roles` keys
-are a site's host, or its blog id on a multisite:
+Most sites need no settings of their own: the site's own domain counts as the
+client's email domain (www.client.example → client.example), `customer` is
+public where WooCommerce runs, and with registration open so is the default
+role, while it can do no more than read. The exceptions go in the repo's
+`data-audit.json` at the root (not composer.json: Composer's lock hash covers
+`extra`): a client email domain that isn't the site's, or a role people get
+outside core registration (an SSO paywall). `public_roles` keys are a site's
+host, or its blog id on a multisite:
 
 ```json
 {
