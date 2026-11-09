@@ -30,7 +30,8 @@ It flags:
   password hash counts: since WordPress 6.8 (April 2025) a password login
   rehashes it, so a phpass hash means no password login since then
 - staff-domain accounts whose address isn't on the config's `staff_emails`
-  (people who left, aliases, shared addresses)
+  (people who left, aliases, shared addresses); a `+tag` is ignored, so
+  `dev@` covers `dev+site@`
 - capabilities granted outside a user's roles (role injection)
 - open registration, urgently when the default role can do more than read
 - application passwords and WooCommerce REST API keys

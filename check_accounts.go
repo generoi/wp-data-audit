@@ -141,7 +141,7 @@ func (c *checker) dormant(u User, who, wpVersion string) {
 
 // leaver: a staff-domain address not on the current staff list.
 func (c *checker) leaver(u User, who string) {
-	if len(c.p.StaffEmails) == 0 || !domainIn(u.Email, c.p.StaffDomains) || c.staff[strings.ToLower(u.Email)] {
+	if len(c.p.StaffEmails) == 0 || !domainIn(u.Email, c.p.StaffDomains) || c.staff[staffAddr(u.Email)] {
 		return
 	}
 	c.flag(Flag{ID: fmt.Sprintf("leaver:%d:%s", u.ID, short(strings.ToLower(u.Email))), Severity: Review, Kind: KindLeaver,

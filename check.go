@@ -56,7 +56,7 @@ type Result struct {
 func Check(in Input) Result {
 	c := &checker{in: in, p: in.Policy, staff: map[string]bool{}}
 	for _, e := range c.p.StaffEmails {
-		c.staff[strings.ToLower(strings.TrimSpace(e))] = true
+		c.staff[staffAddr(e)] = true
 	}
 	for _, s := range c.p.AllowedIPs {
 		if p, err := netip.ParsePrefix(s); err == nil {
@@ -174,6 +174,17 @@ func (c *checker) info(format string, args ...any) {
 
 func (c *checker) problem(format string, args ...any) {
 	c.r.Notes = append(c.r.Notes, Note{Group: c.group, Problem: true, Text: fmt.Sprintf(format, args...)})
+}
+
+// staffAddr is an address as the staff list matches it: lowercased, without
+// a +tag (dev+site@agency.example is dev@agency.example).
+func staffAddr(email string) string {
+	local, domain, ok := strings.Cut(strings.ToLower(strings.TrimSpace(email)), "@")
+	if !ok {
+		return local
+	}
+	local, _, _ = strings.Cut(local, "+")
+	return local + "@" + domain
 }
 
 func (c *checker) allowedIP(ip string) bool {

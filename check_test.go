@@ -165,11 +165,13 @@ func TestDormantAndLeavers(t *testing.T) {
 	fresh.Hash, fresh.Registered = "phpass", "2026-10-01 00:00:00" // too new to judge
 	api := admin(5, "bot@client.example")
 	api.Hash, api.AppPasswords = "phpass", []AppPassword{{UUID: "u", LastUsed: ago(3)}}
+	shared := admin(6, "dev+site@staff.example") // a shared address, subaddressed per site
+	shared.Sessions = []Session{{Login: ago(10)}}
 
 	prev := &Baseline{Users: []BaselineUser{{ID: 2, LastSeen: ago(400)}}}
-	s := &SiteFacts{Version: 1, WPVersion: "6.9.1", Users: []User{active, stale, unused, fresh, api}}
+	s := &SiteFacts{Version: 1, WPVersion: "6.9.1", Users: []User{active, stale, unused, fresh, api, shared}}
 	res := Check(Input{Facts: Facts{At: now, Site: s}, Prev: prev,
-		Policy: Policy{StaffDomains: []string{"staff.example"}, StaffEmails: []string{"JANE@staff.example"}}})
+		Policy: Policy{StaffDomains: []string{"staff.example"}, StaffEmails: []string{"JANE@staff.example", "dev@staff.example"}}})
 	var got []string
 	for _, f := range res.Report.Flags {
 		if f.Kind == KindDormant || f.Kind == KindLeaver {
@@ -182,7 +184,7 @@ func TestDormantAndLeavers(t *testing.T) {
 	}
 	// What was seen is remembered for next time.
 	for _, u := range res.Baseline.Users {
-		if want := map[int]int64{1: ago(10), 2: ago(400), 5: ago(3)}[u.ID]; u.LastSeen != want {
+		if want := map[int]int64{1: ago(10), 2: ago(400), 5: ago(3), 6: ago(10)}[u.ID]; u.LastSeen != want {
 			t.Errorf("user %d last seen %d, want %d", u.ID, u.LastSeen, want)
 		}
 	}

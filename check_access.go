@@ -36,7 +36,7 @@ func (c *checker) access() {
 			staffDomain := domainIn(email, c.p.StaffDomains)
 			var why string
 			switch {
-			case staffDomain && len(c.staff) > 0 && !c.staff[email]:
+			case staffDomain && len(c.staff) > 0 && !c.staff[staffAddr(email)]:
 				why = "Kinsta access for a staff-domain address not on the staff list (a leaver?)"
 			case staffDomain:
 				continue
