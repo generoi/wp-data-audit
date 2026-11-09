@@ -61,8 +61,10 @@ It flags:
   Served files and listed folders are urgent, one flag per plugin folder
   (`uploads/wpallexport/exports`); risky files the URL doesn't serve are for
   review, and a media library upload with a telling name only for review.
-  Media library uploads, Gravity Forms uploads, plugin JSON and folders a
-  plugin serves on purpose (Complianz) are only counted. On a multisite each
+  Media library uploads, Gravity Forms entry uploads (not its `export/` or
+  `logs/`), plugin JSON, an active plugin's own uploads folder (Complianz,
+  WP All Export, WP All Import; flagged once the plugin is gone) and the
+  repo's `public_uploads` are only counted. On a multisite each
   site's uploads are asked for on that site's own domain
 - what each site's public URL gives away: the REST API listing users,
   `?author=1` redirecting to a login slug, XML-RPC answering, the uploads
@@ -127,13 +129,15 @@ public where WooCommerce runs, and with registration open so is the default
 role, while it can do no more than read. The exceptions go in the repo's
 `data-audit.json` at the root (not composer.json: Composer's lock hash covers
 `extra`): a client email domain that isn't the site's, or a role people get
-outside core registration (an SSO paywall). `public_roles` keys are a site's
-host, or its blog id on a multisite:
+outside core registration (an SSO paywall), or a folder under uploads that's
+public on purpose (a product viewer). `public_roles` keys are a site's
+host, or its blog id on a multisite; `public_uploads` are paths below uploads:
 
 ```json
 {
   "public_roles": { "members.example": ["subscriber"] },
-  "client_domains": ["client.example"]
+  "client_domains": ["client.example"],
+  "public_uploads": ["models/product-3d"]
 }
 ```
 

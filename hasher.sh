@@ -57,7 +57,7 @@ risky="-iname *.sql -o -iname *.sql.* -o -iname *.dump -o -iname *.sqlite -o -in
 # plugins write). Only size, mtime and path: never a byte of content.
 documents="-iname *.csv -o -iname *.tsv -o -iname *.xls -o -iname *.xlsx -o -iname *.xlsm
 	-o -iname *.ods -o -iname *.pdf -o -iname *.doc -o -iname *.docx -o -iname *.odt
-	-o -iname *.rtf -o -iname *.xml -o -iname *.json"
+	-o -iname *.rtf -o -iname *.xml -o -iname *.json -o -path */gravity_forms/logs/*.txt"
 data="-printf DATA\040%s\040%T@\040%p\n"
 # Names a line can't carry (a newline or backslash) are left out of DATA and
 # SILENT lines: sha256sum escapes them, printf doesn't. Inline where used, as

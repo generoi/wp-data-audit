@@ -108,7 +108,9 @@ func TestExposed(t *testing.T) {
 		{Path: "web/app/uploads/wpallimport/files/asiakkaat_2019.csv", Size: 10, Mtime: 1551900000},
 		{Path: "web/app/uploads/2024/05/brochure.pdf", Size: 1, Mtime: 1},          // media library
 		{Path: "web/app/uploads/2024/05/customers-export.xlsx", Size: 2, Mtime: 2}, // ...but its name
-		{Path: "web/app/uploads/gravity_forms/1-abc/cv.pdf", Size: 3, Mtime: 1600000000},
+		{Path: "web/app/uploads/gravity_forms/1-0123456789abcdef0123456789abcdef/2020/09/cv.pdf", Size: 3, Mtime: 1600000000},
+		{Path: "web/app/uploads/gravity_forms/export/export-1700000000.csv", Size: 9, Mtime: 9},
+		{Path: "web/app/uploads/gravity_forms/logs/gravityforms_0123abcd.txt", Size: 9, Mtime: 9},
 		{Path: "web/app/uploads/sites/2/complianz/snapshots/policy.pdf"},
 		{Path: "web/app/uploads/elementor/data.json"},
 		{Path: "web/app/uploads/wc-logs/x.log", Size: 4, Mtime: 4},
@@ -122,11 +124,11 @@ func TestExposed(t *testing.T) {
 	for _, c := range cands {
 		paths = append(paths, c.Path)
 	}
-	if strings.Join(paths, " ") != "web/backup.sql web/app/uploads/old.zip web/app/uploads/2024/05/customers-export.xlsx web/app/uploads/wpallimport/files/asiakkaat_2019.csv web/app/uploads/wc-logs/x.log" {
+	if strings.Join(paths, " ") != "web/backup.sql web/app/uploads/old.zip web/app/uploads/2024/05/customers-export.xlsx web/app/uploads/gravity_forms/export/export-1700000000.csv web/app/uploads/gravity_forms/logs/gravityforms_0123abcd.txt web/app/uploads/sites/2/complianz/snapshots/policy.pdf web/app/uploads/wpallimport/files/asiakkaat_2019.csv web/app/uploads/wc-logs/x.log" {
 		t.Fatalf("candidates %v", paths)
 	}
 	n := strings.Join(notes, "\n")
-	for _, want := range []string{"1 documents in the media library", "1 Gravity Forms uploads", "oldest from 2020-09-13", "1 files in folders a plugin serves", "1 JSON files", "1 data files in plugins"} {
+	for _, want := range []string{"1 documents in the media library", "1 Gravity Forms uploads", "oldest from 2020-09-13", "1 JSON files", "1 data files in plugins"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("notes lack %q:\n%s", want, n)
 		}
@@ -137,6 +139,9 @@ func TestExposed(t *testing.T) {
 		"web/app/uploads/2024/05/customers-export.xlsx":        {Status: 200, Type: "text/csv"},
 		"web/app/uploads/wpallimport/files/asiakkaat_2019.csv": {Status: 200, Type: "text/csv"},
 		"web/app/uploads/wc-logs/x.log":                        {Status: 403},
+		"web/app/uploads/sites/2/complianz/snapshots/policy.pdf": {Status: 404},
+		"web/app/uploads/gravity_forms/export/export-1700000000.csv":   {Status: 200, Type: "text/csv"},
+		"web/app/uploads/gravity_forms/logs/gravityforms_0123abcd.txt": {Status: 403},
 	}, Listings: map[string]Listing{"web/app/uploads/wpallimport/files": {Listed: true}}}
 	r := Check(Input{Facts: Facts{At: now, Files: f, Web: w}}).Report
 	got := map[string]Severity{}
@@ -149,13 +154,58 @@ func TestExposed(t *testing.T) {
 		"web/app/uploads/2024/05/customers-export.xlsx": Review, // media library: public on purpose
 		"web/app/uploads/old.zip":                       Review, // a redirect isn't the file
 		"web/app/uploads/wpallimport/files":             Urgent, // listed
+		"web/app/uploads/gravity_forms/export:":         Urgent, // an entry export left behind
 	} {
 		if got[p] != want {
 			t.Errorf("%s: %q, want %s (all %v)", p, got[p], want, got)
 		}
 	}
-	if len(got) != 5 || !strings.Contains(noteTexts(r), "1 logs on the server") {
+	if len(got) != 6 || !strings.Contains(noteTexts(r), "1 logs on the server") {
 		t.Errorf("flags %v, notes %s", got, noteTexts(r))
+	}
+}
+
+// A plugin's own uploads folder is only counted while the plugin is active on
+// that file's site; left behind, it's flagged. A folder the repo declares
+// public is only counted.
+func TestExposedOwnedFolders(t *testing.T) {
+	f := &FileFacts{Content: "web/app", Data: []DataFile{
+		{Path: "web/app/uploads/wpallexport/exports/a1/quotes-export.csv", Size: 1, Mtime: 1},
+		{Path: "web/app/uploads/wpallimport/files/hubspot.csv", Size: 2, Mtime: 2},
+		{Path: "web/app/uploads/sites/2/wpallexport/exports/b2/x.csv", Size: 3, Mtime: 3},
+		{Path: "web/app/uploads/models/mc6-t-3d/index.html", Size: 4, Mtime: 4},
+		{Path: "web/app/uploads/models/mc6-t-3d-old/index.html", Size: 5, Mtime: 5},
+		{Path: "web/app/uploads/sites/2/complianz/snapshots/policy.pdf", Size: 6, Mtime: 6}, // network-active
+	}}
+	served := map[string]Answer{}
+	for _, d := range f.Data {
+		served[d.Path] = Answer{Status: 200, Type: "text/csv"}
+	}
+	site := &SiteFacts{ActivePlugins: map[string][]string{
+		"1": {"wp-all-export-pro/wp-all-export-pro.php"}, "2": {"akismet/akismet.php"}, // installed or not, wp-all-import isn't active
+		"network": {"complianz-gdpr-premium/complianz-gpdr-premium.php"},
+	}}
+	repo := &Repo{PublicUploads: []string{"/models/mc6-t-3d/"}}
+	r := Check(Input{Facts: Facts{At: now, Site: site, Files: f, Web: &WebFacts{Base: "https://site.example", Files: served}}, Repo: repo}).Report
+	var flagged []string
+	for _, fl := range kind(r, KindExposed) {
+		flagged = append(flagged, strings.SplitN(fl.Untrusted, ":", 2)[0])
+	}
+	slices.Sort(flagged)
+	want := []string{"web/app/uploads/models/mc6-t-3d-old", "web/app/uploads/sites/2/wpallexport/exports", "web/app/uploads/wpallimport/files"}
+	if !slices.Equal(flagged, want) {
+		t.Errorf("flagged %v, want %v", flagged, want)
+	}
+	n := noteTexts(r)
+	for _, w := range []string{"1 files in wp-all-export-pro's own uploads folder", "1 files in complianz-gdpr-premium's own uploads folder", "1 files in folders the repo's data-audit.json declares public"} {
+		if !strings.Contains(n, w) {
+			t.Errorf("notes lack %q:\n%s", w, n)
+		}
+	}
+	// Without the collector there's no telling what's active: flagged.
+	r = Check(Input{Facts: Facts{At: now, Files: f, Web: &WebFacts{Base: "https://site.example", Files: served}}, Repo: repo}).Report
+	if len(kind(r, KindExposed)) != 5 {
+		t.Errorf("without site facts: %v", kind(r, KindExposed))
 	}
 }
 

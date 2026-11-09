@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -26,10 +27,12 @@ const ContentDir = "web/app"
 //
 //	{
 //	    "public_roles": {"members.example": ["subscriber"]},
-//	    "client_domains": ["client.example"]
+//	    "client_domains": ["client.example"],
+//	    "public_uploads": ["models/product-3d"]
 //	}
 //
-// public_roles keys are a site's host or, on a multisite, its blog id. A file
+// public_roles keys are a site's host or, on a multisite, its blog id.
+// public_uploads are folders under uploads served on purpose. A file
 // of its own, not composer.json: Composer's lock hash covers `extra`.
 const SettingsFile = "data-audit.json"
 
@@ -43,6 +46,9 @@ type Repo struct {
 	PatchedCore                 bool
 	PublicRoles                 map[string][]string
 	ClientDomains               []string
+	// PublicUploads are folders under uploads ("models/product-3d", or
+	// "sites/2/…" on a multisite) whose documents are public on purpose.
+	PublicUploads []string
 	// WPOrgPlugins are the wordpress.org slugs of the plugins it deploys
 	// from wordpress.org (wp-plugin/ or wpackagist-plugin/ packages).
 	WPOrgPlugins []string
@@ -104,6 +110,15 @@ func (r *Repo) Has(p string) bool {
 	return err == nil
 }
 
+// publicUpload reports whether rest, a path below uploads, is in one of the
+// repo's PublicUploads folders.
+func (r *Repo) publicUpload(rest string) bool {
+	return r != nil && slices.ContainsFunc(r.PublicUploads, func(d string) bool {
+		d = strings.Trim(d, "/")
+		return d != "" && strings.HasPrefix(rest, d+"/")
+	})
+}
+
 // Comparable reports whether the release can be compared with the local
 // install: there is one, at the deployed commit or at one that installs the
 // same files.
@@ -148,12 +163,14 @@ func ReadRepo(dir string) (*Repo, error) {
 	var settings struct {
 		PublicRoles   map[string][]string `json:"public_roles"`
 		ClientDomains []string            `json:"client_domains"`
+		PublicUploads []string            `json:"public_uploads"`
 	}
 	if err := readJSON(filepath.Join(dir, SettingsFile), &settings); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	exp.PublicRoles = settings.PublicRoles
 	exp.ClientDomains = settings.ClientDomains
+	exp.PublicUploads = settings.PublicUploads
 	var lock struct {
 		Packages    []lockPackage `json:"packages"`
 		PackagesDev []lockPackage `json:"packages-dev"`

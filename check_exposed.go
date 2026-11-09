@@ -34,13 +34,24 @@ var (
 	}
 	typeRank = map[string]int{"dump": 0, "secret": 1, "repo": 2, "backup": 3, "archive": 4, "document": 5, "log": 6}
 
-	// Folders under uploads a plugin serves to visitors on purpose:
-	// Complianz's consent vendor lists, CSS and proof-of-consent policy PDFs.
-	publicRE = regexp.MustCompile(`^(sites/\d+/)?complianz/`)
-	mediaRE  = regexp.MustCompile(`^(sites/\d+/)?\d{4}/\d{2}/`)
-	formsRE  = regexp.MustCompile(`^(sites/\d+/)?gravity_forms/`)
+	mediaRE = regexp.MustCompile(`^(sites/\d+/)?\d{4}/\d{2}/`)
+	// Gravity Forms' entry uploads: gravity_forms/<form id>-<wp_hash>/, its
+	// YYYY/MM/ and tmp/. Not its export/ (entry CSVs an interrupted export
+	// leaves behind) or logs/ (debug logs, often with entry data).
+	formsRE  = regexp.MustCompile(`^(sites/\d+/)?gravity_forms/\d+-[0-9a-f]{32}/`)
 	blogRE   = regexp.MustCompile(`^sites/(\d+)/`)
 	tokensRE = regexp.MustCompile(`\p{L}+`)
+
+	// Folders under uploads a plugin writes its own files to, and the plugin
+	// folders that own them: its files there aren't flagged while it's active
+	// on that site, and are once it's gone (left behind with nothing using them).
+	// Complianz serves its consent vendor lists, CSS and proof-of-consent
+	// PDFs to visitors; WP All Export's exports are kept public for feeds.
+	pluginUploads = map[string][]string{
+		"complianz":   {"complianz-gdpr", "complianz-gdpr-premium"},
+		"wpallexport": {"wp-all-export-pro", "wp-all-export"},
+		"wpallimport": {"wp-all-import-pro", "wp-all-import"},
+	}
 
 	// Words in a file name that suggest people's data, in English, Finnish
 	// and Swedish: a word starting with one of personalStems, or one of
@@ -94,7 +105,7 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 	if repo != nil && !compare && repo.TrackedAt != "" && f.Revision != "" && strings.HasPrefix(repo.TrackedAt, f.Revision) {
 		tracked = repo.Tracked
 	}
-	var media, forms, unchecked, public, jsons int
+	var media, forms, unchecked, declared, jsons int
 	var oldestForm int64
 	for _, d := range f.Data {
 		p, name := d.Path, path.Base(d.Path)
@@ -133,8 +144,8 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 		case isMedia && !personal(name):
 			media++
 			continue
-		case publicRE.MatchString(rest) && doc:
-			public++
+		case inUploads && doc && repo.publicUpload(rest):
+			declared++
 			continue
 		case t == "document" && strings.HasSuffix(strings.ToLower(name), ".json") && !personal(name):
 			jsons++ // plugins' own data and caches; an export with a telling name still counts
@@ -165,7 +176,7 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 		text  string
 	}{
 		{media, "%d documents in the media library not checked: uploaded on purpose, no name suggests people's data"},
-		{public, "%d files in folders a plugin serves on purpose (Complianz) not checked"},
+		{declared, "%d files in folders the repo's data-audit.json declares public not checked"},
 		{jsons, "%d JSON files under uploads not checked: plugins' own data, no name suggests people's data"},
 		{unchecked, "%d data files in plugins, themes and core not checked: no install of the deployed commit to tell the release's own from added ones"},
 	} {
@@ -181,7 +192,8 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 
 // exposed: a file the public URL hands out is urgent (one flag per plugin
 // folder under uploads), so is a listed folder; a risky file the server only
-// keeps is for review; blocked logs and documents are only counted.
+// keeps is for review; blocked logs and documents are only counted, and so
+// are documents in an active plugin's own uploads folder (pluginUploads).
 func (c *checker) exposed() {
 	f, w := c.in.Facts.Files, c.in.Facts.Web
 	cands, notes := Candidates(f, c.in.Repo)
@@ -190,8 +202,13 @@ func (c *checker) exposed() {
 	}
 	uploads := f.Content + "/uploads/"
 	blocked := map[string]int{}
+	owned := map[string]int{}
 	folders := map[string][]Candidate{}
 	for _, cd := range cands {
+		if p := c.uploadsOwner(cd.Path, uploads); p != "" && (cd.Type == "document" || cd.Type == "archive") {
+			owned[p]++
+			continue
+		}
 		a, asked := w.Files[cd.Path]
 		at := fmt.Sprintf("%s (%d bytes, %s)", cd.Path, cd.Size, day(cd.Mtime))
 		id := "exposed:" + idPart(cd.Path) + ":" + short(fmt.Sprint(cd.Size), fmt.Sprint(cd.Mtime))
@@ -245,6 +262,9 @@ func (c *checker) exposed() {
 	for _, t := range slices.Sorted(maps.Keys(blocked)) {
 		c.info("%d %ss on the server that the public URL doesn't serve", blocked[t], t)
 	}
+	for _, p := range slices.Sorted(maps.Keys(owned)) {
+		c.info("%d files in %s's own uploads folder not checked: the plugin is active", owned[p], p)
+	}
 	for _, d := range slices.Sorted(maps.Keys(w.Listings)) {
 		if l := w.Listings[d]; l.Listed {
 			c.flag(Flag{ID: "listing:" + idPart(d), Severity: Urgent, Kind: KindExposed, Message: "the web server lists this folder's files", Untrusted: d})
@@ -269,6 +289,28 @@ func pluginFolder(p, uploads string) string {
 		return ""
 	}
 	return uploads + prefix + strings.Join(parts[:min(2, len(parts)-1)], "/")
+}
+
+// uploadsOwner is the active plugin whose own uploads folder (pluginUploads)
+// p is in, on that file's site or network-wide; "" when there's none or no
+// collector ran to say which plugins are active.
+func (c *checker) uploadsOwner(p, uploads string) string {
+	s := c.in.Facts.Site
+	rest, ok := strings.CutPrefix(p, uploads)
+	if s == nil || !ok {
+		return ""
+	}
+	blog := "1"
+	if m := blogRE.FindStringSubmatch(rest); m != nil {
+		blog, rest = m[1], rest[len(m[0]):]
+	}
+	dir, _, _ := strings.Cut(rest, "/")
+	for _, f := range append(slices.Clone(s.ActivePlugins[blog]), s.ActivePlugins["network"]...) {
+		if slices.Contains(pluginUploads[dir], pluginName(f)) {
+			return pluginName(f)
+		}
+	}
+	return ""
 }
 
 // shipped is a path a deploy writes: plugins, themes, mu-plugins, core, vendor.
