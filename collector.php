@@ -402,6 +402,21 @@ $wpda_host = function (string $url) use (&$wpda_self): string {
 
     return $host === '' || $host === $wpda_self ? 'self' : $host;
 };
+// An iframe is its host, except where one host serves many things: Google's
+// Maps embeds and anything else it hosts share www.google.com, so there the
+// first path segment is part of the match (www.google.com/maps).
+$wpda_iframe = function (string $url) use ($wpda_host): string {
+    $host = $wpda_host($url);
+    if ($host === 'www.google.com' || $host === 'google.com') {
+        $path = (string) parse_url(trim(html_entity_decode($url, ENT_QUOTES | ENT_HTML5)), PHP_URL_PATH);
+        $first = explode('/', trim($path, '/'))[0];
+        if ($first !== '') {
+            return $host . '/' . strtolower($first);
+        }
+    }
+
+    return $host;
+};
 // A regex that hits PCRE's backtrack limit returns false: counted, so a scan
 // that silently missed something says so.
 $wpda_pcre = 0;
@@ -415,7 +430,7 @@ $wpda_pm = function (string $re, string $t, &$m = null, int $flags = PREG_PATTER
 
     return $r;
 };
-$wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_scan, $wpda_host, $wpda_pm): array {
+$wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_scan, $wpda_host, $wpda_iframe, $wpda_pm): array {
     $found = [];
     $add = function (string $kind, string $value) use (&$found, $encoded) {
         $found[$kind . "\0" . $value] = [$kind, $value, $encoded];
@@ -437,7 +452,7 @@ $wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_sca
     }
     if ($wpda_pm('#<iframe\b[^>]*\bsrc\s*=\s*["\']?([^"\'\s>]+)#i', $t, $m)) {
         foreach ($m[1] as $src) {
-            $add('iframe', $wpda_host($src));
+            $add('iframe', $wpda_iframe($src));
         }
     }
     if ($wpda_pm('#javascript\s*:[^"\'<>]{0,80}#i', $t, $m)) {
