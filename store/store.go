@@ -116,19 +116,47 @@ type Decision struct {
 	By     string    `json:"by"`
 	At     time.Time `json:"at"`
 	Flag   string    `json:"flag"` // the flag's message and site data when accepted
+	// Everywhere: accepted on every site (not stored, set on reading).
+	Everywhere bool `json:"-"`
 }
 
 // Decisions are k's accepted flags, then the ones accepted on every site.
 func (s Store) Decisions(k Key) ([]Decision, error) {
 	var all []Decision
-	for _, path := range []string{s.accepted(k), s.everywhere()} {
+	for i, path := range []string{s.accepted(k), s.everywhere()} {
 		var list []Decision
 		if err := readJSON(path, &list); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
+		for j := range list {
+			list[j].Everywhere = i == 1
+		}
 		all = append(all, list...)
 	}
 	return all, nil
+}
+
+// DecisionsText lists accepted flags for a person: per scope, each flag's ID,
+// who accepted it, when and why, and what it said then (site data, shown
+// as data).
+func DecisionsText(title string, ds []Decision) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: %d accepted\n", title, len(ds))
+	for _, everywhere := range []bool{false, true} {
+		head := "\nthis site\n"
+		if everywhere {
+			head = "\nevery site\n"
+		}
+		for _, d := range ds {
+			if d.Everywhere != everywhere {
+				continue
+			}
+			b.WriteString(head)
+			head = ""
+			fmt.Fprintf(&b, "  %s\n    %s, %s by %s\n    was: %s\n", d.ID, d.Reason, d.At.Format("2006-01-02"), d.By, d.Flag)
+		}
+	}
+	return b.String()
 }
 
 // Accepted is the set of k's accepted flag IDs, everywhere's included.

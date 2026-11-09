@@ -46,9 +46,12 @@ It flags:
   GitHub's last successful `deploy_production.yml` run, else Deployer's
   `REVISION` file; a checkout a few commits ahead still counts
   when nothing deployed changed in between. Without a local install it falls
-  back to wordpress.org's checksums for core and wp.org plugins. Compiled
-  caches, built `build/` files and WordPress's own translation updates can't
-  be compared and are only counted
+  back to wordpress.org's checksums for core and wp.org plugins. Built asset
+  manifests (`*.asset.php`) are judged by shape on the server instead: pure
+  data (`return array(...)` of quoted strings) is only counted, anything else
+  is urgent. `vendor/autoload.php` is compared with its per-install class
+  suffix masked. Compiled caches, other built `build/` files and WordPress's
+  own translation updates can't be compared and are only counted
 - scripts, iframes, `javascript:` and `data:` URLs, PHP calls and hidden links in
   posts, meta, options, terms and approved comments, plain or encoded
 - files anyone can download that shouldn't be public: database dumps,
@@ -92,6 +95,7 @@ install` (for the file comparison; `gh` finds the deployed commit):
 wp-data-audit geoip-update        # once a month
 wp-data-audit                     # audits @production; exit 1 when there are flags
 wp-data-audit accept <id>...      # an expected flag stays quiet until what it describes changes
+wp-data-audit accepted            # what's been accepted, by whom, when and why
 wp-data-audit --env local --wp "ddev wp" --sh "ddev exec sh -s"   # try it on the local copy
 ```
 

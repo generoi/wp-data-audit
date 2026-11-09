@@ -90,8 +90,16 @@ func (c *checker) release(f *FileFacts, repo *Repo, paths []string, undeployed m
 		}
 		u := unit(p, content)
 		lv, ok := repo.Local[p]
+		pure, shaped := f.Shapes[p]
 		switch {
 		case ok && lv == f.Files[p]:
+			continue
+		case shaped && pure:
+			skipped["built asset manifests (*.asset.php) the hasher found pure data"]++
+			continue
+		case shaped:
+			c.flag(Flag{ID: "asset-shape:" + idPart(p) + ":" + firstN(f.Files[p], 16), Severity: Urgent, Kind: KindRelease,
+				Message: "built asset manifest (*.asset.php) that isn't pure data: WordPress runs it, check it for added code", Untrusted: p})
 			continue
 		case u == content+"/languages":
 			skipped["translation files WordPress updates itself (languages)"]++

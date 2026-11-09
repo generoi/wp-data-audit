@@ -233,9 +233,12 @@ type FileFacts struct {
 	Content  string            // web/app (Bedrock) or wp-content
 	Files    map[string]string // path → sha256
 	Silence  map[string]bool
-	Data     []DataFile
-	Errors   []string
-	Timings  map[string]float64 // seconds per hasher section
+	// Shapes: built asset manifests (*.asset.php) → whether the hasher found
+	// them pure data; nil from an older hasher.
+	Shapes  map[string]bool
+	Data    []DataFile
+	Errors  []string
+	Timings map[string]float64 // seconds per hasher section
 }
 
 // DataFile is one DATA line: only what find knows.
@@ -378,6 +381,15 @@ func ReadFiles(r io.Reader) (*FileFacts, error) {
 			continue
 		case "SILENT":
 			f.Silence[strings.TrimPrefix(strings.ReplaceAll(val, "//", "/"), "./")] = true
+			continue
+		case "SHAPES":
+			f.Shapes = map[string]bool{}
+			continue
+		case "SHAPE": // "SHAPE ok|bad <path>"
+			verdict, path, _ := strings.Cut(val, " ")
+			if f.Shapes != nil && (verdict == "ok" || verdict == "bad") {
+				f.Shapes[strings.TrimPrefix(path, "./")] = verdict == "ok"
+			}
 			continue
 		case "VERSION":
 			version, _ = strconv.Atoi(val)

@@ -1,5 +1,5 @@
 # wp-data-audit hasher, piped to `sh -s` over SSH in the release (or any
-# folder below it). Only the system's own find, sha256sum and grep run:
+# folder below it). Only the system's own find, sha256sum, grep, sed and tr run:
 # nothing from the release, not even its wp-cli, so a compromised site can't
 # change what this reports. It lists every PHP file of the release (core,
 # vendor, plugins, mu-plugins, themes, drop-ins) and under uploads with its
@@ -69,8 +69,26 @@ nl='
 # Composer's generated autoloaders.
 echo FILES
 # shellcheck disable=SC2086 # the variables are this script's own find arguments
-find "$content" vendor $core \( -path "$content/uploads" -o -path vendor/composer \) -prune -o -type f \( $php \) -exec sha256sum {} + 2>/dev/null
+find "$content" vendor $core \( -path "$content/uploads" -o -path vendor/composer -o -path vendor/autoload.php \) -prune -o -type f \( $php \) -exec sha256sum {} + 2>/dev/null
+# vendor/autoload.php with its class suffix masked: Composer keeps an existing
+# install's suffix, so two installs of one lock can differ only there.
+[ -f vendor/autoload.php ] && sed -E 's/ComposerAutoloaderInit[0-9a-f]+/ComposerAutoloaderInitX/g' vendor/autoload.php | sha256sum | sed 's|  -$|  vendor/autoload.php|'
 mark release
+
+# Built asset manifests (*.asset.php), which WordPress requires: a build makes
+# new ones on every deploy, so they're judged by shape, not hash. Stripped of
+# whitespace, a manifest is `<?php return array(...);` of single-quoted
+# strings, array(, ), commas and => only: data, no code. One verdict per file.
+echo SHAPES
+find "$content" \( -path "$content/uploads" -o -name node_modules \) -prune -o -type f -name '*.asset.php' ! -name "*$nl*" ! -name '*\\*' -print 2>/dev/null |
+	while IFS= read -r f; do
+		if tr -d ' \t\r\n' <"$f" | grep -Eqx "<\?phpreturnarray\((array\(|\)|,|=>|'[^'\\\\]*')*\);"; then
+			echo "SHAPE ok $f"
+		else
+			echo "SHAPE bad $f"
+		fi
+	done
+mark shapes
 
 if [ -d web/app ]; then docroot=web pre=; else docroot=. pre=./; fi
 shipped=""

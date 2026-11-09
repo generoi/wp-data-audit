@@ -56,6 +56,28 @@ func TestUploadsAndUndeployed(t *testing.T) {
 	}
 }
 
+// Asset manifests the hasher judged by shape: pure ones aren't compared, even
+// when the checkout built different ones; one with code is urgent, even with
+// no build in the checkout.
+func TestReleaseAssetShapes(t *testing.T) {
+	local := map[string]string{"web/app/themes/theme/build/app.asset.php": "local-build"}
+	server := map[string]string{
+		"web/app/themes/theme/build/app.asset.php":    "deployed-build",
+		"web/app/themes/theme/build/editor.asset.php": "0bad0bad0bad0bad0bad",
+	}
+	repo := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, Revision: "abc123def", Local: local}
+	f := files("abc123", server)
+	f.Shapes = map[string]bool{"web/app/themes/theme/build/app.asset.php": true, "web/app/themes/theme/build/editor.asset.php": false}
+	r := Check(Input{Facts: Facts{At: now, Files: f}, Repo: repo}).Report
+	rel := kind(r, KindRelease)
+	if len(rel) != 1 || rel[0].ID != "asset-shape:web/app/themes/theme/build/editor.asset.php:0bad0bad0bad0bad" || rel[0].Severity != Urgent {
+		t.Fatalf("release flags %+v", rel)
+	}
+	if n := noteTexts(r); !strings.Contains(n, "1 PHP file(s) not compared: built asset manifests") {
+		t.Fatalf("notes %s", n)
+	}
+}
+
 // The release's PHP files against a composer install of the deployed commit:
 // one flag per package or theme, ignoring translations, unbuilt assets and
 // the host's mu-plugin; nothing compared on a revision mismatch.

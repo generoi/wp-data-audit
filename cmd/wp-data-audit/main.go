@@ -39,6 +39,8 @@ const usage = `usage:
   wp-data-audit accept --reason WHY [--everywhere] [--env production] [--repo DIR] ID...
       accept flags from the last audit; they stay quiet until what they describe changes.
       --everywhere: content flags (a script or iframe host) and Kinsta users, on every site
+  wp-data-audit accepted [--env production] [--repo DIR] [--json]
+      list the accepted flags (this site's and every site's): who, when, why, what they said
   wp-data-audit script collector|hasher [--repo DIR] [--only|--skip CHECKS]
       print a script, to pipe to a site by hand:
       wp-data-audit script hasher | ssh host 'cd /site && sh -s' > hashed.txt
@@ -73,6 +75,8 @@ func run(args []string) error {
 	switch cmd {
 	case "accept":
 		return accept(args[1:])
+	case "accepted":
+		return accepted(args[1:])
 	case "script":
 		return printScript(args[1:])
 	case "geoip-update":
@@ -115,6 +119,34 @@ func accept(args []string) error {
 		return errors.New("accept: which flag IDs?")
 	}
 	return store.Default().Accept(target().Key(), fs.Args(), *reason, os.Getenv("USER"), *everywhere)
+}
+
+func accepted(args []string) error {
+	fs, target := flags("accepted")
+	asJSON := fs.Bool("json", false, "print them as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	t := target()
+	ds, err := store.Default().Decisions(t.Key())
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		type out struct {
+			store.Decision
+			Everywhere bool `json:"everywhere"`
+		}
+		list := []out{}
+		for _, d := range ds {
+			list = append(list, out{d, d.Everywhere})
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(list)
+	}
+	fmt.Print(store.DecisionsText(t.Site+" @"+t.Env, ds))
+	return nil
 }
 
 func printScript(args []string) error {

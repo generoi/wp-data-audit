@@ -324,6 +324,9 @@ func hashTree(dir string) (map[string]string, error) {
 			h := sha256.New()
 			for rel := range paths {
 				sum, err := hashFile(filepath.Join(dir, filepath.FromSlash(rel)), h, buf)
+				if rel == "vendor/autoload.php" {
+					sum, err = hashAutoload(filepath.Join(dir, "vendor", "autoload.php"))
+				}
 				mu.Lock()
 				if err != nil && hashErr == nil {
 					hashErr = err
@@ -338,6 +341,20 @@ func hashTree(dir string) (map[string]string, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+// autoloadSuffix is Composer's per-install class suffix in vendor/autoload.php,
+// masked before hashing as hasher.sh's sed does.
+var autoloadSuffix = regexp.MustCompile(`ComposerAutoloaderInit[0-9a-f]+`)
+
+// hashAutoload is vendor/autoload.php's sha256 with its suffix masked.
+func hashAutoload(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(autoloadSuffix.ReplaceAll(b, []byte("ComposerAutoloaderInitX")))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // hashFile is a file's sha256 in hex, h and buf reused between files.
