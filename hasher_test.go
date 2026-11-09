@@ -34,6 +34,9 @@ func TestHasherShapes(t *testing.T) {
 	write(build+"interp.asset.php", "<?php return array('dependencies' => array(), 'version' => \"{${system('id')}}\");\n")
 	write(build+"escape.asset.php", "<?php return array('dependencies' => array('a\\'), system(\\'id'), 'version' => 'a');\n")
 	write("web/app/uploads/x/skip.asset.php", "<?php system('id');")
+	write("web/app/wflogs/config.php", "<?php exit('Access denied'); __halt_compiler(); ?>\n******\x00a:1:{s:1:\"a\";}")
+	write("web/app/wflogs/ips.php", "<?php system('id'); __halt_compiler(); ?>\n")
+	write("web/app/wflogs/rules.php", "<?php\nif (!defined('WFWAF_VERSION')) {\n\texit('Access denied');\n}\n")
 	autoload := "<?php\n\nrequire_once __DIR__ . '/composer/autoload_real.php';\n\nreturn ComposerAutoloaderInit7bdbc28be03650b22a8d27644b745c53::getLoader();\n"
 	write("vendor/autoload.php", autoload)
 
@@ -53,8 +56,18 @@ func TestHasherShapes(t *testing.T) {
 			t.Errorf("%s: shape %v (seen %v), want %v", name, got, ok, want)
 		}
 	}
-	if _, ok := f.Shapes["web/app/uploads/x/skip.asset.php"]; ok || len(f.Shapes) != 7 {
+	if _, ok := f.Shapes["web/app/uploads/x/skip.asset.php"]; ok || len(f.Shapes) != 9 {
 		t.Errorf("shapes %v", f.Shapes)
+	}
+	// Wordfence: data files by their first line; rules.php isn't judged.
+	if ok, seen := f.Shapes["web/app/wflogs/config.php"]; !ok || !seen {
+		t.Errorf("wflogs/config.php: %v %v", ok, seen)
+	}
+	if ok, seen := f.Shapes["web/app/wflogs/ips.php"]; ok || !seen {
+		t.Errorf("wflogs/ips.php: %v %v", ok, seen)
+	}
+	if _, seen := f.Shapes["web/app/wflogs/rules.php"]; seen {
+		t.Error("wflogs/rules.php judged")
 	}
 	// The same file elsewhere, another suffix: the same masked hash.
 	other := filepath.Join(t.TempDir(), "autoload.php")

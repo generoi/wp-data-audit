@@ -46,11 +46,13 @@ var (
 	// folders that own them: its files there aren't flagged while it's active
 	// on that site, and are once it's gone (left behind with nothing using them).
 	// Complianz serves its consent vendor lists, CSS and proof-of-consent
-	// PDFs to visitors; WP All Export's exports are kept public for feeds.
+	// PDFs to visitors; WP All Export's exports are kept public for feeds, and
+	// Product Feed Pro's product feeds are fetched by Google and Meta.
 	pluginUploads = map[string][]string{
-		"complianz":   {"complianz-gdpr", "complianz-gdpr-premium"},
-		"wpallexport": {"wp-all-export-pro", "wp-all-export"},
-		"wpallimport": {"wp-all-import-pro", "wp-all-import"},
+		"complianz":            {"complianz-gdpr", "complianz-gdpr-premium"},
+		"woo-product-feed-pro": {"woo-product-feed-pro"},
+		"wpallexport":          {"wp-all-export-pro", "wp-all-export"},
+		"wpallimport":          {"wp-all-import-pro", "wp-all-import"},
 	}
 
 	// Words in a file name that suggest people's data, in English, Finnish

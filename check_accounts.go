@@ -95,9 +95,14 @@ func (c *checker) registration(s *SiteFacts) {
 		Message: msg, Untrusted: "default role " + reg.Role + ": " + strings.Join(reg.RoleCaps, ", ")})
 }
 
-// readOnly reports whether caps grant no more than reading.
+// selfService are capabilities a plugin gives every user over their own
+// account only: Wordfence Login Security's own 2FA page and passkeys.
+var selfService = map[string]bool{"read": true, "level_0": true, "wfls_show_login_security": true, "wfls_manage_passkey_self": true}
+
+// readOnly reports whether caps grant no more than reading and managing
+// one's own account.
 func readOnly(caps []string) bool {
-	return !slices.ContainsFunc(caps, func(cap string) bool { return cap != "read" && cap != "level_0" })
+	return !slices.ContainsFunc(caps, func(cap string) bool { return !selfService[cap] })
 }
 
 // sessions: one flag per account and country outside the allowed list.

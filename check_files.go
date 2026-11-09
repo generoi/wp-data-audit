@@ -94,12 +94,22 @@ func (c *checker) release(f *FileFacts, repo *Repo, paths []string, undeployed m
 		switch {
 		case ok && lv == f.Files[p]:
 			continue
+		case shaped && pure && u == content+"/wflogs":
+			skipped["Wordfence firewall data files, behind exit and __halt_compiler()"]++
+			continue
 		case shaped && pure:
 			skipped["built asset manifests (*.asset.php) the hasher found pure data"]++
+			continue
+		case shaped && u == content+"/wflogs":
+			c.flag(Flag{ID: "wflogs-shape:" + idPart(p) + ":" + firstN(f.Files[p], 16), Severity: Urgent, Kind: KindRelease,
+				Message: "Wordfence data file that doesn't start with its exit and __halt_compiler() line: check it for added code", Untrusted: p})
 			continue
 		case shaped:
 			c.flag(Flag{ID: "asset-shape:" + idPart(p) + ":" + firstN(f.Files[p], 16), Severity: Urgent, Kind: KindRelease,
 				Message: "built asset manifest (*.asset.php) that isn't pure data: WordPress runs it, check it for added code", Untrusted: p})
+			continue
+		case !ok && p == content+"/wflogs/rules.php":
+			skipped["Wordfence's compiled firewall rules (wflogs/rules.php): generated from its downloaded rule set, can't be compared"]++
 			continue
 		case u == content+"/languages":
 			skipped["translation files WordPress updates itself (languages)"]++

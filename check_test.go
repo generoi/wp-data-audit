@@ -131,7 +131,7 @@ func TestAccountSignals(t *testing.T) {
 	s := site0()
 	s.Users = append(s.Users, User{ID: 9, Login: "c", Roles: []string{"customer"}, ExtraCaps: []string{"manage_options"}})
 	s.Registration = Registration{Open: true, Role: "editor", RoleCaps: []string{"read", "edit_posts"}}
-	s.PublicRoleCaps = map[string][]string{"customer": {"read"}, "3:subscriber": {"read", "manage_options"}}
+	s.PublicRoleCaps = map[string][]string{"customer": {"read", "wfls_manage_passkey_self", "wfls_show_login_security"}, "3:subscriber": {"read", "manage_options"}}
 	s.WooKeys = []WooKey{{Blog: 1, ID: 4, Permissions: "read_write", TruncatedKey: "abc1234"}}
 	got := ids(judge(baselineOf(site0()), s, Policy{}, nil))
 	for id, sev := range map[string]Severity{
@@ -167,9 +167,12 @@ func TestDormantAndLeavers(t *testing.T) {
 	api.Hash, api.AppPasswords = "phpass", []AppPassword{{UUID: "u", LastUsed: ago(3)}}
 	shared := admin(6, "dev+site@staff.example") // a shared address, subaddressed per site
 	shared.Sessions = []Session{{Login: ago(10)}}
+	woo := admin(7, "shop@client.example") // only its WooCommerce REST key is used
+	woo.Hash = "phpass"
 
 	prev := &Baseline{Users: []BaselineUser{{ID: 2, LastSeen: ago(400)}}}
-	s := &SiteFacts{Version: 1, WPVersion: "6.9.1", Users: []User{active, stale, unused, fresh, api, shared}}
+	s := &SiteFacts{Version: 1, WPVersion: "6.9.1", Users: []User{active, stale, unused, fresh, api, shared, woo},
+		WooKeys: []WooKey{{Blog: 1, ID: 1, UserID: 7, LastAccess: time.Unix(ago(2), 0).UTC().Format(time.DateTime)}}}
 	res := Check(Input{Facts: Facts{At: now, Site: s}, Prev: prev,
 		Policy: Policy{StaffDomains: []string{"staff.example"}, StaffEmails: []string{"JANE@staff.example", "dev@staff.example"}}})
 	var got []string
@@ -184,7 +187,7 @@ func TestDormantAndLeavers(t *testing.T) {
 	}
 	// What was seen is remembered for next time.
 	for _, u := range res.Baseline.Users {
-		if want := map[int]int64{1: ago(10), 2: ago(400), 5: ago(3), 6: ago(10)}[u.ID]; u.LastSeen != want {
+		if want := map[int]int64{1: ago(10), 2: ago(400), 5: ago(3), 6: ago(10), 7: ago(2)}[u.ID]; u.LastSeen != want {
 			t.Errorf("user %d last seen %d, want %d", u.ID, u.LastSeen, want)
 		}
 	}

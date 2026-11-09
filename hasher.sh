@@ -88,6 +88,21 @@ find "$content" \( -path "$content/uploads" -o -name node_modules \) -prune -o -
 			echo "SHAPE bad $f"
 		fi
 	done
+# Wordfence's firewall data files: its storage writes each one starting with
+# exactly this line, and PHP stops at __halt_compiler(), so nothing after it
+# runs. rules.php is generated code instead and isn't judged here.
+if [ -d "$content/wflogs" ]; then
+	find "$content/wflogs" -maxdepth 1 -type f -name '*.php' ! -name rules.php ! -name "*$nl*" ! -name '*\\*' -print 2>/dev/null |
+		while IFS= read -r f; do
+			first=
+			IFS= read -r first <"$f"
+			if [ "$first" = "<?php exit('Access denied'); __halt_compiler(); ?>" ]; then
+				echo "SHAPE ok $f"
+			else
+				echo "SHAPE bad $f"
+			fi
+		done
+fi
 mark shapes
 
 if [ -d web/app ]; then docroot=web pre=; else docroot=. pre=./; fi

@@ -62,9 +62,17 @@ func (b *Baseline) hasWooKey(k WooKey) bool {
 // lastSeen is each listed account's newest sign of use: what s shows, or
 // what prev remembered.
 func lastSeen(prev *Baseline, s *SiteFacts) map[int]int64 {
+	// A WooCommerce REST key's last access (a MySQL datetime, the site's
+	// time: a few hours either way doesn't matter here) is its user's use.
+	keys := map[int]int64{}
+	for _, k := range s.WooKeys {
+		if t, err := time.Parse(time.DateTime, k.LastAccess); err == nil {
+			keys[k.UserID] = max(keys[k.UserID], t.Unix())
+		}
+	}
 	out := map[int]int64{}
 	for _, u := range s.Users {
-		seen := u.LastActive
+		seen := max(u.LastActive, keys[u.ID])
 		if p, ok := prev.user(u.ID); ok {
 			seen = max(seen, p.LastSeen)
 		}

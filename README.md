@@ -25,7 +25,8 @@ It flags:
   so a subscriber on a site without sign-ups is flagged too
 - listed accounts not used in over a year. WordPress keeps no last login, so
   this is the newest of: a session's login, WooCommerce's or a plugin's
-  last-activity meta, an application password's last use, and every earlier
+  last-activity meta, an application password's or WooCommerce REST key's
+  last use, and every earlier
   audit's (a login seen once is remembered). With none on record, a phpass
   password hash counts: since WordPress 6.8 (April 2025) a password login
   rehashes it, so a phpass hash means no password login since then
@@ -49,7 +50,10 @@ It flags:
   back to wordpress.org's checksums for core and wp.org plugins. Built asset
   manifests (`*.asset.php`) are judged by shape on the server instead: pure
   data (`return array(...)` of quoted strings) is only counted, anything else
-  is urgent. `vendor/autoload.php` is compared with its per-install class
+  is urgent. Wordfence's `wflogs/` data files are judged by their first line
+  (`exit` and `__halt_compiler()`, so nothing after it runs); its compiled
+  `wflogs/rules.php` can't be judged and is only counted.
+  `vendor/autoload.php` is compared with its per-install class
   suffix masked. Compiled caches, other built `build/` files and WordPress's
   own translation updates can't be compared and are only counted
 - scripts, iframes, `javascript:` and `data:` URLs, PHP calls and hidden links in
@@ -67,7 +71,7 @@ It flags:
   review, and a media library upload with a telling name only for review.
   Media library uploads, Gravity Forms entry uploads (not its `export/` or
   `logs/`), plugin JSON, an active plugin's own uploads folder (Complianz,
-  WP All Export, WP All Import; flagged once the plugin is gone) and the
+  WP All Export, WP All Import, Product Feed Pro; flagged once the plugin is gone) and the
   repo's `public_uploads` are only counted. On a multisite each
   site's uploads are asked for on that site's own domain
 - what each site's public URL gives away: the REST API listing users,

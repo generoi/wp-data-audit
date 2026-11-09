@@ -64,17 +64,28 @@ func TestReleaseAssetShapes(t *testing.T) {
 	server := map[string]string{
 		"web/app/themes/theme/build/app.asset.php":    "deployed-build",
 		"web/app/themes/theme/build/editor.asset.php": "0bad0bad0bad0bad0bad",
+		"web/app/wflogs/config.php":                   "1",
+		"web/app/wflogs/ips.php":                      "badc0debadc0debadc0de",
+		"web/app/wflogs/rules.php":                    "3",
 	}
 	repo := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, Revision: "abc123def", Local: local}
 	f := files("abc123", server)
-	f.Shapes = map[string]bool{"web/app/themes/theme/build/app.asset.php": true, "web/app/themes/theme/build/editor.asset.php": false}
+	f.Shapes = map[string]bool{"web/app/themes/theme/build/app.asset.php": true, "web/app/themes/theme/build/editor.asset.php": false,
+		"web/app/wflogs/config.php": true, "web/app/wflogs/ips.php": false}
 	r := Check(Input{Facts: Facts{At: now, Files: f}, Repo: repo}).Report
-	rel := kind(r, KindRelease)
-	if len(rel) != 1 || rel[0].ID != "asset-shape:web/app/themes/theme/build/editor.asset.php:0bad0bad0bad0bad" || rel[0].Severity != Urgent {
-		t.Fatalf("release flags %+v", rel)
+	var got []string
+	for _, fl := range kind(r, KindRelease) {
+		got = append(got, fl.ID)
 	}
-	if n := noteTexts(r); !strings.Contains(n, "1 PHP file(s) not compared: built asset manifests") {
-		t.Fatalf("notes %s", n)
+	slices.Sort(got)
+	if strings.Join(got, " ") != "asset-shape:web/app/themes/theme/build/editor.asset.php:0bad0bad0bad0bad wflogs-shape:web/app/wflogs/ips.php:badc0debadc0deba" {
+		t.Fatalf("release flags %v", got)
+	}
+	n := noteTexts(r)
+	for _, want := range []string{"1 PHP file(s) not compared: built asset manifests", "1 PHP file(s) not compared: Wordfence firewall data files", "1 PHP file(s) not compared: Wordfence's compiled firewall rules"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("notes lack %q:\n%s", want, n)
+		}
 	}
 }
 
