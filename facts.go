@@ -199,8 +199,18 @@ type PluginChecksum struct {
 
 // RetentionFacts is how long personal data is kept: counts, dates and settings.
 type RetentionFacts struct {
-	Forms []FormRetention `json:"forms"`
-	Woo   []WooRetention  `json:"woo"`
+	Forms    []FormRetention `json:"forms"`
+	Woo      []WooRetention  `json:"woo"`
+	Honeypot []FormHoneypot  `json:"honeypot"`
+}
+
+// FormHoneypot is an active Gravity Forms form whose honeypot throws caught
+// submissions away (Spam → "Do not create an entry") instead of keeping them
+// as spam.
+type FormHoneypot struct {
+	Blog   int    `json:"blog"`
+	FormID int    `json:"form_id"`
+	Title  string `json:"title"`
 }
 
 // FormRetention is one Gravity Forms form: Policy is its Personal Data

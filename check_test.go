@@ -257,9 +257,12 @@ func TestRetention(t *testing.T) {
 			{Blog: 1, Orders: 5000, Oldest: "2018-05-01 00:00:00", Settings: map[string]string{"anonymize_completed_orders": "", "delete_inactive_accounts": "24 months"}},
 			{Blog: 2, Orders: 10, Oldest: "2018-05-01 00:00:00", Settings: map[string]string{"anonymize_completed_orders": "7 years"}},
 		},
+		Honeypot: []FormHoneypot{{Blog: 2, FormID: 4, Title: "Contest"}, {Blog: 2, FormID: 6, Title: "Contact"}},
 	}
 	got := kind(judge(nil, s, Policy{}, nil), KindRetention)
-	if len(got) != 2 || !strings.HasPrefix(got[0].ID, "retention:forms:1:") || !strings.Contains(got[0].Message, "1 forms keep every entry (900") || got[1].ID != "retention:woo:1" {
+	if len(got) != 3 || !strings.HasPrefix(got[0].ID, "retention:forms:1:") || !strings.Contains(got[0].Message, "1 forms keep every entry (900") ||
+		!strings.HasPrefix(got[1].ID, "retention:honeypot:2:") || !strings.HasPrefix(got[1].Message, "2 forms throw away what their honeypot catches") ||
+		got[1].Untrusted != `blog 2: form 4 "Contest"; form 6 "Contact"` || got[2].ID != "retention:woo:1" {
 		t.Fatalf("retention flags %+v", got)
 	}
 }

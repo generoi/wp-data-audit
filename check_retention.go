@@ -51,6 +51,25 @@ func (c *checker) retention() {
 				len(s.ids), s.entries, s.oldest.Format("2006-01-02")),
 			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(s.list, "; "))})
 	}
+	// Forms throwing away what their honeypot catches, one flag per site.
+	hp := map[int][]FormHoneypot{}
+	var hpBlogs []int
+	for _, f := range r.Honeypot {
+		if hp[f.Blog] == nil {
+			hpBlogs = append(hpBlogs, f.Blog)
+		}
+		hp[f.Blog] = append(hp[f.Blog], f)
+	}
+	for _, b := range hpBlogs {
+		var ids, list []string
+		for _, f := range hp[b] {
+			ids = append(ids, fmt.Sprint(f.FormID))
+			list = append(list, fmt.Sprintf("form %d %q", f.FormID, f.Title))
+		}
+		c.flag(Flag{ID: fmt.Sprintf("retention:honeypot:%d:%s", b, short(ids...)), Severity: Review, Kind: KindRetention,
+			Message: fmt.Sprintf("%d forms throw away what their honeypot catches, so a real person it catches (a stale page failing state validation) is lost unseen: set Form Settings → Spam to keep them as spam", len(ids)),
+			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(list, "; "))})
+	}
 	for _, w := range r.Woo {
 		t, isOld := old(w.Oldest)
 		if w.Orders == 0 || !isOld || w.Settings["anonymize_completed_orders"] != "" {

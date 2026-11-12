@@ -339,16 +339,23 @@ $wpda_timed('plugins');
 // How long personal data is kept: per Gravity Forms form its entry count,
 // oldest entry and retention setting; per WooCommerce shop its order count,
 // oldest order and the anonymise/delete settings. Counts and dates only.
-$wpda['retention'] = ['forms' => [], 'woo' => []];
+// Also every active form whose honeypot throws a caught submission away
+// instead of keeping it as spam: a real person caught by it is lost unseen.
+$wpda['retention'] = ['forms' => [], 'woo' => [], 'honeypot' => []];
 empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
     $has = fn (string $t) => (bool) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($t)));
     $p = $wpdb->prefix;
     if ($has("{$p}gf_entry") && $has("{$p}gf_form")) {
         $meta = [];
         if ($has("{$p}gf_form_meta")) {
-            foreach ($wpdb->get_results("SELECT form_id, display_meta FROM {$p}gf_form_meta") as $m) {
+            $sql = "SELECT m.form_id, m.display_meta, f.title, f.is_active, f.is_trash FROM {$p}gf_form_meta m JOIN {$p}gf_form f ON f.id = m.form_id";
+            foreach ($wpdb->get_results($sql) as $m) {
                 $d = json_decode((string) $m->display_meta, true);
                 $meta[(int) $m->form_id] = $d['personalData']['retention'] ?? [];
+                // Unset is spam since Gravity Forms 2.9.8.
+                if (!empty($d['enableHoneypot']) && ($d['honeypotAction'] ?? 'spam') === 'abort' && $m->is_active && !$m->is_trash) {
+                    $wpda['retention']['honeypot'][] = ['blog' => $blog, 'form_id' => (int) $m->form_id, 'title' => substr((string) $m->title, 0, 120)];
+                }
             }
         }
         $sql = "SELECT f.id, f.title, COUNT(e.id) AS n, MIN(e.date_created) AS oldest FROM {$p}gf_form f
