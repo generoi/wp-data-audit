@@ -82,6 +82,9 @@ It flags:
 - personal data kept with no end: Gravity Forms forms with entries over two
   years old and no retention period, and shops with orders over two years old
   that never anonymise completed orders. Only counts and dates are collected
+- Gravity Forms forms whose honeypot throws caught submissions away instead
+  of keeping them as spam, and CleanTalk deleting the Gravity Forms entries
+  it judges spam: a real person either catches is lost without a trace
 
 On a multisite every site is covered; facts from sites other than the main
 one are tagged with their blog id, and network admins show as `super_admin`.

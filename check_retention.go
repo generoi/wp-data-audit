@@ -10,6 +10,10 @@ import (
 // a retention setting is flagged.
 const RetentionAfter = 2 * 365 * 24 * time.Hour
 
+// StateLifespanMin is the shortest Gravity Forms state token lifespan that
+// outlives any page cache: a year and a day.
+const StateLifespanMin = 366 * 24 * time.Hour
+
 // retention: forms and shops keeping personal data past RetentionAfter with
 // no setting that ends it. One flag per site's forms, its ID covering them,
 // so accepting holds until another form starts keeping old entries.
@@ -50,6 +54,47 @@ func (c *checker) retention() {
 			Message: fmt.Sprintf("%d forms keep every entry (%d in all, the oldest from %s): set a retention period (form settings → Personal Data) or delete old entries",
 				len(s.ids), s.entries, s.oldest.Format("2006-01-02")),
 			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(s.list, "; "))})
+	}
+	// Forms throwing away what their honeypot catches, one flag per site.
+	hp := map[int][]FormHoneypot{}
+	var hpBlogs []int
+	for _, f := range r.Honeypot {
+		if hp[f.Blog] == nil {
+			hpBlogs = append(hpBlogs, f.Blog)
+		}
+		hp[f.Blog] = append(hp[f.Blog], f)
+	}
+	for _, b := range hpBlogs {
+		var ids, list []string
+		for _, f := range hp[b] {
+			ids = append(ids, fmt.Sprint(f.FormID))
+			list = append(list, fmt.Sprintf("form %d %q", f.FormID, f.Title))
+		}
+		c.flag(Flag{ID: fmt.Sprintf("retention:honeypot:%d:%s", b, short(ids...)), Severity: Review, Kind: KindRetention,
+			Message: fmt.Sprintf("%d forms throw away what their honeypot catches, so a real person it catches (a stale page failing state validation) is lost unseen: set Form Settings → Spam to keep them as spam", len(ids)),
+			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(list, "; "))})
+	}
+	// A state token shorter than StateLifespanMin, one flag per site: a
+	// cached page older than it has every submission rejected.
+	var brief []string
+	least := 0
+	for _, s := range r.StateLifespan {
+		if s.Seconds < int(StateLifespanMin.Seconds()) {
+			brief = append(brief, fmt.Sprint(s.Blog))
+			if least == 0 || s.Seconds < least {
+				least = s.Seconds
+			}
+		}
+	}
+	if len(brief) > 0 {
+		c.flag(Flag{ID: "retention:state-lifespan", Severity: Review, Kind: KindRetention,
+			Message: fmt.Sprintf("Gravity Forms' state token lasts %d h, so every submission from a page cached longer is rejected: set gform_state_lifespan to 366 days in a mu-plugin (a theme's filter doesn't count here)", least/3600),
+			Untrusted: "blogs " + strings.Join(brief, ", ")})
+	}
+	for _, b := range r.CleanTalkDeletes {
+		c.flag(Flag{ID: fmt.Sprintf("retention:cleantalk:%d", b), Severity: Review, Kind: KindRetention,
+			Message:   "CleanTalk deletes the Gravity Forms entries it judges spam, so a real person it catches is lost unseen: turn on its setting to save Gravity Forms spam",
+			Untrusted: fmt.Sprintf("blog %d", b)})
 	}
 	for _, w := range r.Woo {
 		t, isOld := old(w.Oldest)

@@ -199,8 +199,30 @@ type PluginChecksum struct {
 
 // RetentionFacts is how long personal data is kept: counts, dates and settings.
 type RetentionFacts struct {
-	Forms []FormRetention `json:"forms"`
-	Woo   []WooRetention  `json:"woo"`
+	Forms    []FormRetention `json:"forms"`
+	Woo      []WooRetention  `json:"woo"`
+	Honeypot []FormHoneypot  `json:"honeypot"`
+	// CleanTalkDeletes are the blogs where CleanTalk deletes the Gravity
+	// Forms entries it judges spam (its "save spam" setting off).
+	CleanTalkDeletes []int `json:"cleantalk_deletes"`
+	// StateLifespan is, per blog with Gravity Forms active, how long its
+	// state token stays valid as mu-plugins set it (gform_state_lifespan).
+	StateLifespan []StateLifespan `json:"state_lifespan"`
+}
+
+// StateLifespan is one blog's Gravity Forms state token lifespan.
+type StateLifespan struct {
+	Blog    int `json:"blog"`
+	Seconds int `json:"seconds"`
+}
+
+// FormHoneypot is an active Gravity Forms form whose honeypot throws caught
+// submissions away (Spam → "Do not create an entry") instead of keeping them
+// as spam.
+type FormHoneypot struct {
+	Blog   int    `json:"blog"`
+	FormID int    `json:"form_id"`
+	Title  string `json:"title"`
 }
 
 // FormRetention is one Gravity Forms form: Policy is its Personal Data
