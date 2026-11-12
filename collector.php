@@ -341,7 +341,7 @@ $wpda_timed('plugins');
 // oldest order and the anonymise/delete settings. Counts and dates only.
 // Also every active form whose honeypot throws a caught submission away
 // instead of keeping it as spam: a real person caught by it is lost unseen.
-$wpda['retention'] = ['forms' => [], 'woo' => [], 'honeypot' => []];
+$wpda['retention'] = ['forms' => [], 'woo' => [], 'honeypot' => [], 'cleantalk_deletes' => []];
 empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
     $has = fn (string $t) => (bool) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($t)));
     $p = $wpdb->prefix;
@@ -371,6 +371,15 @@ empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$
                 'policy' => (string) ($r['policy'] ?? 'retain'),
                 'days' => (int) ($r['retain_entries_days'] ?? 0),
             ];
+        }
+        // CleanTalk deletes the Gravity Forms entries it judges spam unless
+        // its "save spam" setting is on.
+        $plugin = 'cleantalk-spam-protect/cleantalk.php';
+        $ct = get_option('cleantalk_settings');
+        $active = in_array($plugin, (array) get_option('active_plugins', []), true)
+            || (is_multisite() && isset(((array) get_site_option('active_sitewide_plugins', []))[$plugin]));
+        if ($active && is_array($ct) && !empty($ct['forms__contact_forms_test']) && empty($ct['forms__gravityforms_save_spam'])) {
+            $wpda['retention']['cleantalk_deletes'][] = $blog;
         }
     }
     if (get_option('woocommerce_version') === false) {

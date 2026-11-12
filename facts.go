@@ -202,6 +202,9 @@ type RetentionFacts struct {
 	Forms    []FormRetention `json:"forms"`
 	Woo      []WooRetention  `json:"woo"`
 	Honeypot []FormHoneypot  `json:"honeypot"`
+	// CleanTalkDeletes are the blogs where CleanTalk deletes the Gravity
+	// Forms entries it judges spam (its "save spam" setting off).
+	CleanTalkDeletes []int `json:"cleantalk_deletes"`
 }
 
 // FormHoneypot is an active Gravity Forms form whose honeypot throws caught

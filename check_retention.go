@@ -70,6 +70,11 @@ func (c *checker) retention() {
 			Message: fmt.Sprintf("%d forms throw away what their honeypot catches, so a real person it catches (a stale page failing state validation) is lost unseen: set Form Settings → Spam to keep them as spam", len(ids)),
 			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(list, "; "))})
 	}
+	for _, b := range r.CleanTalkDeletes {
+		c.flag(Flag{ID: fmt.Sprintf("retention:cleantalk:%d", b), Severity: Review, Kind: KindRetention,
+			Message:   "CleanTalk deletes the Gravity Forms entries it judges spam, so a real person it catches is lost unseen: turn on its setting to save Gravity Forms spam",
+			Untrusted: fmt.Sprintf("blog %d", b)})
+	}
 	for _, w := range r.Woo {
 		t, isOld := old(w.Oldest)
 		if w.Orders == 0 || !isOld || w.Settings["anonymize_completed_orders"] != "" {
