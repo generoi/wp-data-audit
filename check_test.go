@@ -259,12 +259,15 @@ func TestRetention(t *testing.T) {
 		},
 		Honeypot:         []FormHoneypot{{Blog: 2, FormID: 4, Title: "Contest"}, {Blog: 2, FormID: 6, Title: "Contact"}},
 		CleanTalkDeletes: []int{3},
+		StateLifespan:    []StateLifespan{{Blog: 1, Seconds: 366 * 86400}, {Blog: 2, Seconds: 7 * 86400}, {Blog: 3, Seconds: 2 * 86400}},
 	}
 	got := kind(judge(nil, s, Policy{}, nil), KindRetention)
-	if len(got) != 4 || got[0].ID != "retention:cleantalk:3" || !strings.HasPrefix(got[0].Message, "CleanTalk deletes") ||
+	if len(got) != 5 || got[0].ID != "retention:cleantalk:3" || !strings.HasPrefix(got[0].Message, "CleanTalk deletes") ||
 		!strings.HasPrefix(got[1].ID, "retention:forms:1:") || !strings.Contains(got[1].Message, "1 forms keep every entry (900") ||
 		!strings.HasPrefix(got[2].ID, "retention:honeypot:2:") || !strings.HasPrefix(got[2].Message, "2 forms throw away what their honeypot catches") ||
-		got[2].Untrusted != `blog 2: form 4 "Contest"; form 6 "Contact"` || got[3].ID != "retention:woo:1" {
+		got[2].Untrusted != `blog 2: form 4 "Contest"; form 6 "Contact"` ||
+		got[3].ID != "retention:state-lifespan" || !strings.HasPrefix(got[3].Message, "Gravity Forms' state token lasts 48 h") || got[3].Untrusted != "blogs 2, 3" ||
+		got[4].ID != "retention:woo:1" {
 		t.Fatalf("retention flags %+v", got)
 	}
 }

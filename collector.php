@@ -341,7 +341,7 @@ $wpda_timed('plugins');
 // oldest order and the anonymise/delete settings. Counts and dates only.
 // Also every active form whose honeypot throws a caught submission away
 // instead of keeping it as spam: a real person caught by it is lost unseen.
-$wpda['retention'] = ['forms' => [], 'woo' => [], 'honeypot' => [], 'cleantalk_deletes' => []];
+$wpda['retention'] = ['forms' => [], 'woo' => [], 'honeypot' => [], 'cleantalk_deletes' => [], 'state_lifespan' => []];
 empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
     $has = fn (string $t) => (bool) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($t)));
     $p = $wpdb->prefix;
@@ -380,6 +380,15 @@ empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$
             || (is_multisite() && isset(((array) get_site_option('active_sitewide_plugins', []))[$plugin]));
         if ($active && is_array($ct) && !empty($ct['forms__contact_forms_test']) && empty($ct['forms__gravityforms_save_spam'])) {
             $wpda['retention']['cleantalk_deletes'][] = $blog;
+        }
+        // How long a rendered form's state token stays valid: Gravity Forms
+        // rejects submissions from a page cached longer. Its default is 48 h;
+        // only mu-plugins can raise it here (themes and plugins aren't loaded).
+        $gf = 'gravityforms/gravityforms.php';
+        if (in_array($gf, (array) get_option('active_plugins', []), true)
+            || (is_multisite() && isset(((array) get_site_option('active_sitewide_plugins', []))[$gf]))) {
+            $life = apply_filters('gform_state_lifespan', 2 * DAY_IN_SECONDS, 0);
+            $wpda['retention']['state_lifespan'][] = ['blog' => $blog, 'seconds' => is_int($life) ? $life : 2 * DAY_IN_SECONDS];
         }
     }
     if (get_option('woocommerce_version') === false) {

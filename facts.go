@@ -205,6 +205,15 @@ type RetentionFacts struct {
 	// CleanTalkDeletes are the blogs where CleanTalk deletes the Gravity
 	// Forms entries it judges spam (its "save spam" setting off).
 	CleanTalkDeletes []int `json:"cleantalk_deletes"`
+	// StateLifespan is, per blog with Gravity Forms active, how long its
+	// state token stays valid as mu-plugins set it (gform_state_lifespan).
+	StateLifespan []StateLifespan `json:"state_lifespan"`
+}
+
+// StateLifespan is one blog's Gravity Forms state token lifespan.
+type StateLifespan struct {
+	Blog    int `json:"blog"`
+	Seconds int `json:"seconds"`
 }
 
 // FormHoneypot is an active Gravity Forms form whose honeypot throws caught
