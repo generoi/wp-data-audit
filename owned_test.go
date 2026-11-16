@@ -87,6 +87,36 @@ func TestPluginOwnedUploadsPHP(t *testing.T) {
 	}
 }
 
+// A document that is a media library attachment is a media library upload
+// wherever it sits (a site without year/month folders keeps them in uploads'
+// root): counted, or for review when its name suggests people's data; one
+// that isn't stays urgent.
+func TestExposedMediaAttachments(t *testing.T) {
+	f := &FileFacts{Content: "web/app", Data: []DataFile{
+		{Path: "web/app/uploads/Toimitussisältö-2018.pdf", Size: 1, Mtime: 1},
+		{Path: "web/app/uploads/customers-2019.pdf", Size: 2, Mtime: 2},
+		{Path: "web/app/uploads/sites/2/hinnasto.pdf", Size: 3, Mtime: 3},
+		{Path: "web/app/uploads/stray.pdf", Size: 4, Mtime: 4},
+	}}
+	served := map[string]Answer{}
+	for _, d := range f.Data {
+		served[d.Path] = Answer{Status: 200, Type: "application/pdf"}
+	}
+	s := site0()
+	s.MediaFiles = []string{"Toimitussisältö-2018.pdf", "customers-2019.pdf", "sites/2/hinnasto.pdf"}
+	r := Check(Input{Facts: Facts{At: now, Site: s, Files: f, Web: &WebFacts{Base: "https://site.example", Files: served}}}).Report
+	got := map[string]Severity{}
+	for _, fl := range kind(r, KindExposed) {
+		got[strings.SplitN(fl.Untrusted, " (", 2)[0]] = fl.Severity
+	}
+	if len(got) != 2 || got["web/app/uploads/stray.pdf"] != Urgent || got["web/app/uploads/customers-2019.pdf"] != Review {
+		t.Fatalf("exposed flags %v", got)
+	}
+	if !strings.Contains(noteTexts(r), "2 documents in the media library not checked") {
+		t.Errorf("notes %s", noteTexts(r))
+	}
+}
+
 // A downloadable document a published page links to is counted; unlinked, or
 // linked with a name that suggests people's data, it's still flagged.
 func TestExposedLinkedDocuments(t *testing.T) {

@@ -110,12 +110,30 @@ type SiteFacts struct {
 	Sensitive        map[string]string   `json:"sensitive"`      // option (blog-tagged) → its value's hash
 	// LinkedUploads are the files below uploads that published posts and their
 	// fields link to (every blog's), as paths below uploads: linked on purpose.
-	LinkedUploads []string           `json:"linked_uploads"`
-	Timings       map[string]float64 `json:"timings"` // seconds per collector section
-	PeakMB        float64            `json:"peak_mb"` // the PHP process's peak memory, WordPress included
-	Errors        []string           `json:"errors"`
+	LinkedUploads []string `json:"linked_uploads"`
+	// MediaFiles are the documents below uploads that are media library
+	// attachments (every blog's _wp_attached_file, as paths below uploads):
+	// uploaded on purpose, wherever the site keeps its uploads.
+	MediaFiles []string           `json:"media_files"`
+	Timings    map[string]float64 `json:"timings"` // seconds per collector section
+	PeakMB     float64            `json:"peak_mb"` // the PHP process's peak memory, WordPress included
+	Errors     []string           `json:"errors"`
 
-	linkedSet map[string]bool
+	linkedSet, mediaSet map[string]bool
+}
+
+// media is MediaFiles as a set; none for nil s.
+func (s *SiteFacts) media() map[string]bool {
+	if s == nil {
+		return nil
+	}
+	if s.mediaSet == nil {
+		s.mediaSet = map[string]bool{}
+		for _, p := range s.MediaFiles {
+			s.mediaSet[path.Clean(p)] = true
+		}
+	}
+	return s.mediaSet
 }
 
 // linked is LinkedUploads as a set.

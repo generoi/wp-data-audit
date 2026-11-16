@@ -303,7 +303,7 @@ func (r *run) gather(ctx context.Context, script string) audit.Facts {
 			t := where
 			t.Content = facts.Files.Content
 			var o web.Options
-			cands, _ := audit.Candidates(facts.Files, r.repo)
+			cands, _ := audit.Candidates(facts.Files, r.repo, facts.Site) // Site is set before located closes
 			for _, c := range cands {
 				o.Files = append(o.Files, c.Path)
 			}
