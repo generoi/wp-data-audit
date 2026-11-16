@@ -32,6 +32,7 @@ func (c *checker) accounts() {
 	} else if len(c.p.AllowedCountries) == 0 {
 		c.info("no allowed countries configured: session countries not checked")
 	}
+	active, pluginCaps := c.activeFolders(""), 0
 	for _, u := range s.Users {
 		who := fmt.Sprintf("user %d %q <%s> roles %s", u.ID, u.Login, u.Email, strings.Join(u.Roles, ","))
 		if u.Privileged {
@@ -51,8 +52,19 @@ func (c *checker) accounts() {
 			c.dormant(u, who, s.WPVersion)
 			c.leaver(u, who)
 		}
-		if len(u.ExtraCaps) > 0 {
-			caps := slices.Sorted(slices.Values(u.ExtraCaps))
+		// Capabilities an active plugin gives its users itself (WPML's
+		// translator ones) aren't injection: only the rest is flagged.
+		var caps []string
+		for _, cp := range u.ExtraCaps {
+			if !ownedCap(active, cp) {
+				caps = append(caps, cp)
+			}
+		}
+		if len(caps) < len(u.ExtraCaps) {
+			pluginCaps++
+		}
+		if len(caps) > 0 {
+			slices.Sort(caps)
 			c.flag(Flag{ID: fmt.Sprintf("caps:%d:%s", u.ID, short(caps...)), Severity: Urgent, Kind: KindCapabilities,
 				Message:   "user holds capabilities outside their roles (role injection?)",
 				Untrusted: who + "; extra: " + strings.Join(caps, ", ")})
@@ -62,6 +74,9 @@ func (c *checker) accounts() {
 				Message:   "application password",
 				Untrusted: fmt.Sprintf("%s; name %q, created %s, last used %s from %s", who, p.Name, ts(p.Created), ts(p.LastUsed), p.LastIP)})
 		}
+	}
+	if pluginCaps > 0 {
+		c.info("%d users hold capabilities that active plugins give their users themselves (such as WPML's translate): not flagged", pluginCaps)
 	}
 	for _, k := range s.WooKeys {
 		isNew := prev != nil && !prev.hasWooKey(k)
