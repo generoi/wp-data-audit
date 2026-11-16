@@ -24,12 +24,22 @@ func (c *checker) files() {
 	f, repo := c.in.Facts.Files, c.in.Repo
 	uploads := f.Content + "/uploads/"
 	paths := slices.Sorted(maps.Keys(f.Files))
+	active, cached := c.activeFolders(""), map[string]int{}
 	for _, p := range paths {
 		if rest, ok := strings.CutPrefix(p, uploads); ok && !f.Silence[p] {
+			// An active plugin's compiled cache, in exactly its shape (WPML's
+			// Twig templates): counted, not flagged.
+			if pl := ownedPHP(active, rest); pl != "" {
+				cached[pl]++
+				continue
+			}
 			v := f.Files[p]
 			c.flag(Flag{ID: "upload-php:" + idPart(rest) + ":" + firstN(v, 16), Severity: Urgent, Kind: KindFile,
 				Message: "executable file under uploads", Untrusted: rest + " (sha256 " + v + ")"})
 		}
+	}
+	for _, pl := range slices.Sorted(maps.Keys(cached)) {
+		c.info("%d PHP files under uploads are %s's compiled cache, in its own shape: not flagged", cached[pl], pl)
 	}
 	switch {
 	case repo == nil:

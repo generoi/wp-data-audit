@@ -207,6 +207,7 @@ func (c *checker) exposed() {
 	uploads := f.Content + "/uploads/"
 	blocked := map[string]int{}
 	owned := map[string]int{}
+	linked := 0
 	folders := map[string][]Candidate{}
 	for _, cd := range cands {
 		if p := c.uploadsOwner(cd.Path, uploads); p != "" && (cd.Type == "document" || cd.Type == "archive") {
@@ -214,6 +215,13 @@ func (c *checker) exposed() {
 			continue
 		}
 		a, asked := w.Files[cd.Path]
+		// A document a published page or its fields link to is public on
+		// purpose: counted, unless its name suggests people's data.
+		if rest, ok := strings.CutPrefix(cd.Path, uploads); ok && asked && a.Served() && (cd.Type == "document" || cd.Type == "archive") &&
+			!personal(path.Base(cd.Path)) && c.linkedDoc(rest) {
+			linked++
+			continue
+		}
 		at := fmt.Sprintf("%s (%d bytes, %s)", cd.Path, cd.Size, day(cd.Mtime))
 		id := "exposed:" + idPart(cd.Path) + ":" + short(fmt.Sprint(cd.Size), fmt.Sprint(cd.Mtime))
 		switch {
@@ -265,6 +273,9 @@ func (c *checker) exposed() {
 	}
 	for _, t := range slices.Sorted(maps.Keys(blocked)) {
 		c.info("%d %ss on the server that the public URL doesn't serve", blocked[t], t)
+	}
+	if linked > 0 {
+		c.info("%d downloadable documents under uploads that published pages link to: public on purpose, not flagged", linked)
 	}
 	for _, p := range slices.Sorted(maps.Keys(owned)) {
 		c.info("%d files in %s's own uploads folder not checked: the plugin is active", owned[p], p)

@@ -639,6 +639,38 @@ if ($wpda_pcre > 0) {
 }
 $wpda_timed('content');
 
+// Documents below uploads that published posts and their fields link to (by
+// URL, as page builders and ACF link fields store them): linked on purpose,
+// so the exposed check only counts them. Paths are below uploads, a network
+// site's with its sites/<id>/. Up to $wpda_rows rows a table.
+$wpda_linked = [];
+empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpda_stream, $wpda_rows, &$wpda_linked, &$wpda_errors) {
+    $find = function ($v) use (&$wpda_linked) {
+        if (preg_match_all('~/uploads/((?:sites/\d+/)?[^"\'\s<>?#\\\\]+\.(?:pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|csv|txt|zip|rar|7z))~i', (string) $v, $m)) {
+            foreach ($m[1] as $p) {
+                $wpda_linked[rawurldecode($p)] = true;
+            }
+        }
+    };
+    foreach ([
+        'ID' => "SELECT ID AS wpda_k, post_content FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_type <> 'revision' AND post_content LIKE '%/uploads/%'",
+        'm.meta_id' => "SELECT m.meta_id AS wpda_k, m.meta_value FROM {$wpdb->postmeta} m JOIN {$wpdb->posts} p ON p.ID = m.post_id AND p.post_status = 'publish' AND p.post_type <> 'revision' WHERE m.meta_value LIKE '%/uploads/%'",
+    ] as $key => $sql) {
+        $err = $wpda_stream($sql, $key, function ($r) use ($find) {
+            foreach ((array) $r as $k => $v) {
+                if ($k !== 'wpda_k') {
+                    $find($v);
+                }
+            }
+        }, $wpda_rows);
+        if ($err !== null && $err !== 'truncated') {
+            $wpda_errors[] = 'linked uploads: ' . $err;
+        }
+    }
+});
+$wpda['linked_uploads'] = array_keys($wpda_linked);
+$wpda_timed('linked');
+
 // Files are the hasher's (hasher.php), which runs without WordPress.
 
 // Checksums against wordpress.org, for sites whose files can't be compared

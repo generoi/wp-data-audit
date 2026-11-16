@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -107,9 +108,25 @@ type SiteFacts struct {
 	ActivePlugins    map[string][]string `json:"active_plugins"`    // blog id (or "network") → plugin files ("akismet/akismet.php")
 	Cron             map[string][]string `json:"cron"`           // blog id → scheduled hook names
 	Sensitive        map[string]string   `json:"sensitive"`      // option (blog-tagged) → its value's hash
-	Timings          map[string]float64  `json:"timings"` // seconds per collector section
-	PeakMB           float64             `json:"peak_mb"` // the PHP process's peak memory, WordPress included
-	Errors           []string            `json:"errors"`
+	// LinkedUploads are the files below uploads that published posts and their
+	// fields link to (every blog's), as paths below uploads: linked on purpose.
+	LinkedUploads []string           `json:"linked_uploads"`
+	Timings       map[string]float64 `json:"timings"` // seconds per collector section
+	PeakMB        float64            `json:"peak_mb"` // the PHP process's peak memory, WordPress included
+	Errors        []string           `json:"errors"`
+
+	linkedSet map[string]bool
+}
+
+// linked is LinkedUploads as a set.
+func (s *SiteFacts) linked() map[string]bool {
+	if s.linkedSet == nil {
+		s.linkedSet = map[string]bool{}
+		for _, p := range s.LinkedUploads {
+			s.linkedSet[path.Clean(p)] = true
+		}
+	}
+	return s.linkedSet
 }
 
 type Registration struct {
