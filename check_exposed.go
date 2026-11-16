@@ -156,6 +156,8 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 			why = "a media library upload whose name suggests people's data"
 		case personal(name):
 			why = "the name suggests people's data"
+		case doc && !strings.Contains(rest, "/"):
+			why = "in the uploads folder itself, not the media library"
 		case doc:
 			why = "in a plugin's folder under uploads, not the media library"
 		default:

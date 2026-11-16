@@ -160,6 +160,13 @@ func TestExposed(t *testing.T) {
 	if strings.Join(paths, " ") != "web/backup.sql web/app/uploads/old.zip web/app/uploads/2024/05/customers-export.xlsx web/app/uploads/gravity_forms/export/export-1700000000.csv web/app/uploads/gravity_forms/logs/gravityforms_0123abcd.txt web/app/uploads/sites/2/complianz/snapshots/policy.pdf web/app/uploads/wpallimport/files/asiakkaat_2019.csv web/app/uploads/wc-logs/x.log" {
 		t.Fatalf("candidates %v", paths)
 	}
+	// A document in uploads' own root is said to be there, not in a plugin's folder.
+	for _, c := range cands {
+		if want := map[string]string{"web/app/uploads/old.zip": "in the uploads folder itself, not the media library",
+			"web/app/uploads/sites/2/complianz/snapshots/policy.pdf": "in a plugin's folder under uploads, not the media library"}[c.Path]; want != "" && c.Why != want {
+			t.Errorf("%s: why %q, want %q", c.Path, c.Why, want)
+		}
+	}
 	n := strings.Join(notes, "\n")
 	for _, want := range []string{"1 documents in the media library", "1 Gravity Forms uploads", "oldest from 2020-09-13", "1 JSON files", "1 data files in plugins"} {
 		if !strings.Contains(n, want) {
