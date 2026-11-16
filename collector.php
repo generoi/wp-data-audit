@@ -671,6 +671,27 @@ empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpd
 $wpda['linked_uploads'] = array_keys($wpda_linked);
 $wpda_timed('linked');
 
+// Documents that are media library attachments, as paths below uploads (a
+// network site's with its sites/<id>/): uploaded on purpose, also where the
+// site keeps its uploads in uploads' root rather than year/month folders.
+$wpda_media = [];
+empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpda_stream, $wpda_rows, &$wpda_media, &$wpda_errors) {
+    $prefix = is_multisite() && ! is_main_site($blog) ? "sites/{$blog}/" : '';
+    $err = $wpda_stream(
+        "SELECT meta_id AS wpda_k, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value REGEXP '[.](pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|csv|txt|zip|rar|7z)$'",
+        'meta_id',
+        function ($r) use (&$wpda_media, $prefix) {
+            $wpda_media[$prefix . ltrim((string) $r->meta_value, '/')] = true;
+        },
+        $wpda_rows
+    );
+    if ($err !== null && $err !== 'truncated') {
+        $wpda_errors[] = 'media files: ' . $err;
+    }
+});
+$wpda['media_files'] = array_keys($wpda_media);
+$wpda_timed('media');
+
 // Files are the hasher's (hasher.php), which runs without WordPress.
 
 // Checksums against wordpress.org, for sites whose files can't be compared

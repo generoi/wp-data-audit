@@ -152,7 +152,7 @@ func TestExposed(t *testing.T) {
 		{Path: "web/app/plugins/woocommerce/sample-data/x.csv", Size: 7, Mtime: 7}, // no install to compare
 		{Path: "web/app/uploads/old.zip", Size: 8, Mtime: 8},
 	}}
-	cands, notes := Candidates(f, nil)
+	cands, notes := Candidates(f, nil, nil)
 	var paths []string
 	for _, c := range cands {
 		paths = append(paths, c.Path)
@@ -463,7 +463,7 @@ func TestCandidatesAtDeployedCommit(t *testing.T) {
 		{Path: "web/app/export.csv"},
 	}}
 	cands := func() (paths []string) {
-		c, _ := Candidates(f, repo)
+		c, _ := Candidates(f, repo, nil)
 		for _, x := range c {
 			paths = append(paths, x.Path)
 		}

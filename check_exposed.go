@@ -96,11 +96,14 @@ func dataType(p string) string {
 // commit, the files git tracks at the deployed one are (Repo.Tracked), and
 // what Composer installs (plugins, vendor) is only counted. notes say what
 // was only counted. Pure and deterministic: the probes ask about these
-// paths, and the exposed check joins their answers back to them.
-func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
+// paths, and the exposed check joins their answers back to them. site (nil
+// when the collector didn't run) says which documents are media library
+// attachments: a site without year/month folders keeps them in uploads' root.
+func Candidates(f *FileFacts, repo *Repo, site *SiteFacts) (out []Candidate, notes []string) {
 	if f == nil {
 		return nil, nil
 	}
+	attached := site.media()
 	uploads := f.Content + "/uploads/"
 	compare := repo != nil && repo.Dir != "" && !stale(f, repo)
 	var tracked map[string]bool
@@ -130,7 +133,7 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 		t := dataType(p)
 		rest := strings.TrimPrefix(p, uploads)
 		doc := t == "document" || t == "archive"
-		isMedia := inUploads && doc && mediaRE.MatchString(rest)
+		isMedia := inUploads && doc && (mediaRE.MatchString(rest) || attached[path.Clean(rest)])
 		why := ""
 		switch {
 		case !inUploads && t == "document":
@@ -200,7 +203,7 @@ func Candidates(f *FileFacts, repo *Repo) (out []Candidate, notes []string) {
 // are documents in an active plugin's own uploads folder (pluginUploads).
 func (c *checker) exposed() {
 	f, w := c.in.Facts.Files, c.in.Facts.Web
-	cands, notes := Candidates(f, c.in.Repo)
+	cands, notes := Candidates(f, c.in.Repo, c.in.Facts.Site)
 	for _, n := range notes {
 		c.info("%s", n)
 	}
