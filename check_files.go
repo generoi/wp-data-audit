@@ -82,7 +82,8 @@ func (c *checker) undeployed(f *FileFacts, repo *Repo, paths []string) map[strin
 	return units
 }
 
-// release compares every PHP file outside uploads with the local install:
+// release compares every PHP file outside uploads with the local install,
+// and one that differs in a git-sourced plugin with composer.lock's ref:
 // one flag per package or theme, its ID covering every differing file, so
 // accepting it holds until any of them changes again.
 func (c *checker) release(f *FileFacts, repo *Repo, paths []string, undeployed map[string]bool) {
@@ -90,6 +91,7 @@ func (c *checker) release(f *FileFacts, repo *Repo, paths []string, undeployed m
 	type diff struct{ changed, extra []string }
 	diffs := map[string]*diff{}
 	skipped := map[string]int{}
+	edited := map[string]int{} // files production has as composer.lock's ref has them, the checkout not
 	for _, p := range paths {
 		if strings.HasPrefix(p, content+"/uploads/") {
 			continue
@@ -130,6 +132,9 @@ func (c *checker) release(f *FileFacts, repo *Repo, paths []string, undeployed m
 		case !ok && (strings.Contains(p, "/build/") || strings.Contains(p, "/dist/") && strings.HasSuffix(p, ".asset.php")):
 			skipped["built files the checkout hasn't built (build/, dist/*.asset.php)"]++
 			continue
+		case repo.AtLock(p, f.Files[p]):
+			edited[u]++
+			continue
 		}
 		d := diffs[u]
 		if d == nil {
@@ -159,6 +164,9 @@ func (c *checker) release(f *FileFacts, repo *Repo, paths []string, undeployed m
 	}
 	for _, what := range slices.Sorted(maps.Keys(skipped)) {
 		c.info("%d PHP file(s) not compared: %s", skipped[what], what)
+	}
+	for _, u := range slices.Sorted(maps.Keys(edited)) {
+		c.info("%s: %d PHP file(s) match composer.lock's ref but not the checkout's install, which was edited: compared with the ref", u, edited[u])
 	}
 	// The collector runs core, mu-plugins, drop-ins and the site's wp-cli; the
 	// hasher doesn't. When those differ, the collector's answers are suspect.

@@ -136,6 +136,45 @@ func TestReleaseComparedWithDeployedCommit(t *testing.T) {
 	}
 }
 
+// A git-sourced plugin whose checkout copy was edited by hand: production's
+// file as composer.lock's ref has it isn't flagged (a note says so); one the
+// ref doesn't have, or that GitHub can't serve, still is.
+func TestReleaseEditedCheckoutComparedWithLockRef(t *testing.T) {
+	sum := func(s string) string { b := sha256.Sum256([]byte(s)); return hex.EncodeToString(b[:]) }
+	atRef := map[string]string{"inc/a.php": "<?php // a", "inc/b.php": "<?php // b"}
+	orig := fileAtRef
+	t.Cleanup(func() { fileAtRef = orig })
+	var asked []string
+	fileAtRef = func(repo, ref, path string) ([]byte, error) {
+		asked = append(asked, repo+"@"+ref+":"+path)
+		if s, ok := atRef[path]; ok {
+			return []byte(s), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	local := map[string]string{
+		"web/app/plugins/fork/inc/a.php": sum("<?php // a, edited"),
+		"web/app/plugins/fork/inc/b.php": sum("<?php // b, edited"),
+	}
+	server := map[string]string{
+		"web/app/plugins/fork/inc/a.php": sum("<?php // a"),     // the ref's
+		"web/app/plugins/fork/inc/b.php": sum("<?php // b, bad"), // neither
+	}
+	repo := &Repo{Plugins: map[string]bool{"fork": true}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, Revision: "abc123def", Local: local,
+		Sources: map[string]Source{"web/app/plugins/fork": {Repo: "acme/fork", Ref: "fc60653"}}}
+	r := Check(Input{Facts: Facts{At: now, Files: files("abc123", server)}, Repo: repo}).Report
+	rel := kind(r, KindRelease)
+	if len(rel) != 1 || !strings.Contains(rel[0].Message, "1 changed, 0 not in the release") || !strings.Contains(rel[0].Untrusted, "inc/b.php") || strings.Contains(rel[0].Untrusted, "inc/a.php") {
+		t.Fatalf("release flags %+v", rel)
+	}
+	if n := noteTexts(r); !strings.Contains(n, "web/app/plugins/fork: 1 PHP file(s) match composer.lock's ref") {
+		t.Fatalf("notes %s", n)
+	}
+	if !slices.Contains(asked, "acme/fork@fc60653:inc/a.php") {
+		t.Fatalf("asked %v", asked)
+	}
+}
+
 func TestExposed(t *testing.T) {
 	f := &FileFacts{Content: "web/app", Data: []DataFile{
 		{Path: "web/app/uploads/wpallimport/files/asiakkaat_2019.csv", Size: 10, Mtime: 1551900000},
@@ -364,14 +403,17 @@ func TestReadRepo(t *testing.T) {
 		"web/app/mu-plugins/{$name}/":["type:wordpress-muplugin","wp-plugin/moved"],
 		"web/app/plugins/{$name}/":["type:wordpress-plugin"]},
 		"dropin-paths":{"web/app/":["package:wp-plugin/cache:wp-cache-phase1.php"],"web/app/mu-plugins":["package:vendor/cli:plugin/login-server.php"]},
-		"patches":{"wp-plugin/fixed":{},"roots/wordpress-no-content":{}}}}`)
+		"patches":{"wp-plugin/fixed":{},"roots/wordpress-no-content":{},"acme/patched-fork":{}}}}`)
 	write("data-audit.json", `{"public_roles":{"members.example":["subscriber"]},"client_domains":["client.example"]}`)
 	write("composer.lock", `{"packages":[
 		{"name":"wp-plugin/fixed","type":"wordpress-plugin"},
 		{"name":"wp-plugin/moved","type":"wordpress-plugin"},
 		{"name":"vendor/mu","type":"wordpress-muplugin"},
 		{"name":"vendor/renamed-package","type":"wordpress-plugin","extra":{"installer-name":"renamed"}},
-		{"name":"vendor/lib","type":"library"}],
+		{"name":"vendor/lib","type":"library","source":{"type":"git","url":"https://github.com/vendor/lib.git","reference":"1111"}},
+		{"name":"acme/fork","type":"wordpress-plugin","source":{"type":"git","url":"git@github.com:acme/fork.git","reference":"fc60653"}},
+		{"name":"acme/patched-fork","type":"wordpress-plugin","source":{"type":"git","url":"https://github.com/acme/patched-fork","reference":"2222"}},
+		{"name":"acme/zip","type":"wordpress-plugin","source":{"type":"zip","url":"https://example.com/zip.zip","reference":"3333"}}],
 		"packages-dev":[{"name":"wp-plugin/dev-only","type":"wordpress-plugin"}]}`)
 	write("web/app/mu-plugins/local.php", "<?php")
 	write("web/app/plugins/custom/custom.php", "<?php")
@@ -405,10 +447,13 @@ func TestReadRepo(t *testing.T) {
 			}
 		}
 	}
-	check("plugins", repo.Plugins, "fixed", "custom", "renamed", "woocommerce")
+	check("plugins", repo.Plugins, "fixed", "custom", "renamed", "woocommerce", "fork", "patched-fork", "zip")
+	if len(repo.Sources) != 1 || repo.Sources["web/app/plugins/fork"] != (Source{Repo: "acme/fork", Ref: "fc60653"}) {
+		t.Errorf("sources %v: only the unpatched plugin from GitHub", repo.Sources)
+	}
 	check("mu-plugins", repo.MuPlugins, "moved", "mu", "local.php", "login-server.php")
 	check("dropins", repo.Dropins, "object-cache.php", "wp-cache-phase1.php")
-	check("patched", repo.PatchedPlugins, "fixed")
+	check("patched", repo.PatchedPlugins, "fixed", "patched-fork")
 	if !repo.PatchedCore {
 		t.Error("core patch not seen")
 	}
