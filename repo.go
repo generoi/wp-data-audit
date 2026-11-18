@@ -10,6 +10,7 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,8 +65,51 @@ type Repo struct {
 	// ships from the repo itself, whatever the working tree holds.
 	Tracked   map[string]bool
 	TrackedAt string
-	dir       string // the checkout, install or not
+	// Sources are the unpatched plugins and mu-plugins it installs from a
+	// GitHub repo, by folder ("web/app/plugins/x"): composer.lock's ref of
+	// each, for a file the checkout's install doesn't match (AtLock).
+	Sources map[string]Source
+	dir     string // the checkout, install or not
 }
+
+// Source is a package's GitHub repo ("owner/name") and composer.lock's ref.
+type Source struct{ Repo, Ref string }
+
+// fileAtRef is path's content in a GitHub repo at ref (gh, read only).
+var fileAtRef = func(repo, ref, path string) ([]byte, error) {
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return exec.Command("gh", "api", "-H", "Accept: application/vnd.github.raw+json",
+		"repos/"+repo+"/contents/"+strings.Join(segs, "/")+"?ref="+url.QueryEscape(ref)).Output()
+}
+
+// AtLock reports whether p, a file of one of the Sources, has sha256 sum at
+// its package's composer.lock ref. The checkout's install can be a copy that
+// was edited by hand (worktrees clone it from the main checkout, and Composer
+// doesn't reinstall a version it already has); the ref is what deploys ship.
+func (r *Repo) AtLock(p, sum string) bool {
+	if r == nil {
+		return false
+	}
+	for dir, s := range r.Sources {
+		rest, ok := strings.CutPrefix(p, dir+"/")
+		if !ok {
+			continue
+		}
+		b, err := fileAtRef(s.Repo, s.Ref, rest)
+		if err != nil {
+			return false
+		}
+		got := sha256.Sum256(b)
+		return hex.EncodeToString(got[:]) == sum
+	}
+	return false
+}
+
+// githubRepo matches a git URL on github.com; its group is "owner/name".
+var githubRepo = regexp.MustCompile(`^(?:git@github\.com:|https://github\.com/)([^/]+/[^/]+?)(?:\.git)?/?$`)
 
 // LoadTracked reads the files git tracks at commit rev (one ls-tree), for a
 // checkout that isn't at it, else GitHub's tree of that commit (gh, read
@@ -181,13 +225,21 @@ func ReadRepo(dir string) (*Repo, error) {
 
 	where := map[string]map[string]bool{"plugins": exp.Plugins, "mu-plugins": exp.MuPlugins}
 	types := map[string]string{}
+	sources := map[string]Source{} // by package name, until the patched ones are known
+	folders := map[string]string{}
 	for _, p := range lock.Packages { // packages-dev aren't installed on production
 		types[p.Name] = p.Type
 		if vendor, slug, _ := strings.Cut(p.Name, "/"); p.Type == "wordpress-plugin" && (vendor == "wp-plugin" || vendor == "wpackagist-plugin") {
 			exp.WPOrgPlugins = append(exp.WPOrgPlugins, slug)
 		}
-		if set := where[installDir(p, cj.Extra.InstallerPaths)]; set != nil {
-			set[cmp.Or(p.Extra.InstallerName, base(p.Name))] = true
+		sub := installDir(p, cj.Extra.InstallerPaths)
+		if set := where[sub]; set != nil {
+			name := cmp.Or(p.Extra.InstallerName, base(p.Name))
+			set[name] = true
+			if m := githubRepo.FindStringSubmatch(p.Source.URL); m != nil && p.Source.Type == "git" && p.Source.Reference != "" {
+				sources[p.Name] = Source{Repo: m[1], Ref: p.Source.Reference}
+				folders[p.Name] = ContentDir + "/" + sub + "/" + name
+			}
 		}
 	}
 
@@ -232,6 +284,12 @@ func ReadRepo(dir string) (*Repo, error) {
 			exp.PatchedCore = true
 		case types[name] == "wordpress-plugin":
 			exp.PatchedPlugins[base(name)] = true
+		}
+	}
+	exp.Sources = map[string]Source{}
+	for name, s := range sources {
+		if !patched[name] { // the ref doesn't have the patch the install does
+			exp.Sources[folders[name]] = s
 		}
 	}
 
@@ -372,8 +430,13 @@ func hashFile(path string, h hash.Hash, buf []byte) (string, error) {
 }
 
 type lockPackage struct {
-	Name  string `json:"name"`
-	Type  string `json:"type"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Source struct {
+		Type      string `json:"type"`
+		URL       string `json:"url"`
+		Reference string `json:"reference"`
+	} `json:"source"`
 	Extra struct {
 		InstallerName string `json:"installer-name"` // composer/installers' folder-name override
 	} `json:"extra"`
