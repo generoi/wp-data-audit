@@ -80,6 +80,28 @@ func TestAllowedIPSkipsItsCountryOnly(t *testing.T) {
 	}
 }
 
+// A repo's login_countries let one account log in from a country, and only
+// that account and that country.
+func TestLoginCountriesAllowOneAccount(t *testing.T) {
+	s := site0()
+	s.Users[0].Sessions = []Session{{IP: "198.51.100.1"}, {IP: "198.51.100.2"}}
+	s.Users = append(s.Users, User{ID: 2, Login: "other", Email: "other@staff.example", Roles: []string{"administrator"}, Privileged: true,
+		Sessions: []Session{{IP: "198.51.100.3"}}})
+	geo := fakeGeo{"198.51.100.1": "PK", "198.51.100.2": "UY", "198.51.100.3": "PK"}
+	in := Input{Facts: Facts{At: now, Site: s}, Geo: geo, Repo: &Repo{LoginCountries: map[string][]string{"1": {"PK"}}},
+		Policy: Policy{AllowedCountries: []string{"FI"}}}
+	got := ids(Check(in).Report)
+	if _, ok := got["session:1:PK"]; ok {
+		t.Error("the account's listed country was flagged")
+	}
+	if _, ok := got["session:1:UY"]; !ok {
+		t.Error("the account's other country wasn't flagged")
+	}
+	if _, ok := got["session:2:PK"]; !ok {
+		t.Error("another account from the listed country wasn't flagged")
+	}
+}
+
 func TestNewAdminOutsideDomainsIsUrgent(t *testing.T) {
 	s := site0()
 	s.Users = append(s.Users,

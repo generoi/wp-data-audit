@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -30,13 +31,16 @@ const ContentDir = "web/app"
 //	    "public_roles": {"members.example": ["subscriber"]},
 //	    "client_domains": ["client.example"],
 //	    "public_uploads": ["models/product-3d", "price-list.pdf"],
-//	    "inactive_plugins": ["library-plugin"]
+//	    "inactive_plugins": ["library-plugin"],
+//	    "login_countries": {"12": ["PK"]}
 //	}
 //
 // public_roles keys are a site's host or, on a multisite, its blog id.
 // public_uploads are folders or files under uploads served on purpose;
 // inactive_plugins are plugin folders installed but never activated on
-// purpose (another plugin loads them as a library). A file of its own, not
+// purpose (another plugin loads them as a library); login_countries are
+// countries beyond the allowed ones that an account, by user id, logs in
+// from on purpose. A file of its own, not
 // composer.json: Composer's lock hash covers `extra`.
 const SettingsFile = "data-audit.json"
 
@@ -55,6 +59,9 @@ type Repo struct {
 	PublicUploads []string
 	// InactivePlugins are plugin folders installed but inactive on purpose.
 	InactivePlugins []string
+	// LoginCountries are ISO codes, by user id ("12"), an account logs in
+	// from on purpose beyond the policy's allowed countries.
+	LoginCountries map[string][]string
 	// WPOrgPlugins are the wordpress.org slugs of the plugins it deploys
 	// from wordpress.org (wp-plugin/ or wpackagist-plugin/ packages).
 	WPOrgPlugins []string
@@ -168,6 +175,11 @@ func (r *Repo) publicUpload(rest string) bool {
 	})
 }
 
+// loginCountry reports whether the repo lets account id log in from cc.
+func (r *Repo) loginCountry(id int, cc string) bool {
+	return r != nil && slices.Contains(r.LoginCountries[strconv.Itoa(id)], cc)
+}
+
 // Comparable reports whether the release can be compared with the local
 // install: there is one, at the deployed commit or at one that installs the
 // same files.
@@ -214,6 +226,7 @@ func ReadRepo(dir string) (*Repo, error) {
 		ClientDomains   []string            `json:"client_domains"`
 		PublicUploads   []string            `json:"public_uploads"`
 		InactivePlugins []string            `json:"inactive_plugins"`
+		LoginCountries  map[string][]string `json:"login_countries"`
 	}
 	if err := readJSON(filepath.Join(dir, SettingsFile), &settings); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -222,6 +235,7 @@ func ReadRepo(dir string) (*Repo, error) {
 	exp.ClientDomains = settings.ClientDomains
 	exp.PublicUploads = settings.PublicUploads
 	exp.InactivePlugins = settings.InactivePlugins
+	exp.LoginCountries = settings.LoginCountries
 	var lock struct {
 		Packages    []lockPackage `json:"packages"`
 		PackagesDev []lockPackage `json:"packages-dev"`
