@@ -26,7 +26,8 @@ type Policy struct {
 	Accepted         map[string]bool // flag IDs a person accepted
 	// Pending are the last report's flags, ID → severity. A finding a change
 	// raised (an option's new value, a new admin) stays flagged, and urgent,
-	// until accepted, however often the audit runs in between.
+	// until accepted, however often the audit runs in between. Any other
+	// flag's severity is today's rules'.
 	Pending map[string]Severity
 }
 
@@ -157,15 +158,22 @@ func (c *checker) now() time.Time {
 	return c.in.Facts.At
 }
 
-// flag adds f unless it was accepted; a flag that was urgent stays urgent.
+// flag adds f unless it was accepted, at the severity today's rules give it.
 func (c *checker) flag(f Flag) {
 	if c.p.Accepted[f.ID] {
 		return
 	}
+	c.r.Flags = append(c.r.Flags, f)
+}
+
+// flagChange is flag for a finding that's urgent because it's new since the
+// last baseline (a new admin, a new API key): the next run's baseline has it,
+// so it stays urgent while the last report had it urgent, until accepted.
+func (c *checker) flagChange(f Flag) {
 	if c.p.Pending[f.ID] == Urgent {
 		f.Severity = Urgent
 	}
-	c.r.Flags = append(c.r.Flags, f)
+	c.flag(f)
 }
 
 func (c *checker) info(format string, args ...any) {

@@ -460,6 +460,10 @@ $wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_sca
     $add = function (string $kind, string $value) use (&$found, $encoded) {
         $found[$kind . "\0" . $value] = [$kind, $value, $encoded];
     };
+    // The plain scripts and iframes found, left out of the decoded rescan: an
+    // inline script with an entity in it ('&amp;', '&copy;') is already
+    // reported, and decoded it would be reported again as encoded.
+    $spans = [];
     if ($wpda_pm('#<script\b([^>]*)>(.*?)(?:</script\s*>|$)#is', $t, $m, PREG_SET_ORDER)) {
         foreach ($m as $s) {
             // Browsers run a script without a type, a module, or a JavaScript MIME
@@ -473,11 +477,17 @@ $wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_sca
             } else {
                 $add('script-inline', mb_substr(trim(preg_replace('/\s+/', ' ', $s[2])), 0, 4000));
             }
+            // Only a closed one: an unclosed script runs to the end of the text,
+            // which may hold an encoded one of its own.
+            if (preg_match('#</script\s*>$#i', $s[0])) {
+                $spans[] = $s[0];
+            }
         }
     }
-    if ($wpda_pm('#<iframe\b[^>]*\bsrc\s*=\s*["\']?([^"\'\s>]+)#i', $t, $m)) {
-        foreach ($m[1] as $src) {
-            $add('iframe', $wpda_iframe($src));
+    if ($wpda_pm('#<iframe\b[^>]*\bsrc\s*=\s*["\']?([^"\'\s>]+)#i', $t, $m, PREG_SET_ORDER)) {
+        foreach ($m as $s) {
+            $add('iframe', $wpda_iframe($s[1]));
+            $spans[] = $s[0];
         }
     }
     if ($wpda_pm('#javascript\s*:[^"\'<>]{0,80}#i', $t, $m)) {
@@ -506,11 +516,12 @@ $wpda_scan = function (string $t, bool $encoded, int $depth = 0) use (&$wpda_sca
                 $found += $wpda_scan((string) base64_decode($b), true, 1);
             }
         }
-        $n = html_entity_decode($t, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $rest = $spans ? str_replace($spans, ' ', $t) : $t;
+        $n = html_entity_decode($rest, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         if (stripos($n, '%3c') !== false) {
             $n = urldecode($n);
         }
-        if ($n !== $t) {
+        if ($n !== $rest) {
             foreach ($wpda_scan($n, true, 1) as $k => $f) {
                 $found[$k] ??= $f;
             }

@@ -141,15 +141,18 @@ public where WooCommerce runs, and with registration open so is the default
 role, while it can do no more than read. The exceptions go in the repo's
 `data-audit.json` at the root (not composer.json: Composer's lock hash covers
 `extra`): a client email domain that isn't the site's, or a role people get
-outside core registration (an SSO paywall), or a folder under uploads that's
-public on purpose (a product viewer). `public_roles` keys are a site's
-host, or its blog id on a multisite; `public_uploads` are paths below uploads:
+outside core registration (an SSO paywall), a folder or file under uploads
+that's public on purpose (a product viewer), or a plugin installed but never
+activated on purpose (another plugin loads it as a library). `public_roles`
+keys are a site's host, or its blog id on a multisite; `public_uploads` are
+paths below uploads; `inactive_plugins` are plugin folders:
 
 ```json
 {
   "public_roles": { "members.example": ["subscriber"] },
   "client_domains": ["client.example"],
-  "public_uploads": ["models/product-3d"]
+  "public_uploads": ["models/product-3d", "price-list.pdf"],
+  "inactive_plugins": ["library-plugin"]
 }
 ```
 

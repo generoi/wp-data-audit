@@ -22,11 +22,17 @@ func (c *checker) plugins() {
 			active[pluginName(f)] = true
 		}
 	}
+	library := 0
 	for _, p := range slices.Sorted(slices.Values(s.InstalledPlugins)) {
-		if !active[p] {
+		if !active[p] && c.in.Repo != nil && slices.Contains(c.in.Repo.InactivePlugins, p) {
+			library++
+		} else if !active[p] {
 			c.flag(Flag{ID: "plugin-inactive:" + idPart(p), Severity: Review, Kind: KindPlugin,
 				Message: "plugin installed but active on no site: remove it from composer.json (an inactive plugin's files can still be attacked)", Untrusted: p})
 		}
+	}
+	if library > 0 {
+		c.info("%d inactive plugins the repo's data-audit.json declares inactive on purpose: not flagged", library)
 	}
 	if prev := c.in.Prev; prev != nil && prev.Plugins != nil {
 		for _, blog := range slices.Sorted(maps.Keys(s.ActivePlugins)) {

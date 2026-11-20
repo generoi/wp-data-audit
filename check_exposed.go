@@ -183,7 +183,7 @@ func Candidates(f *FileFacts, repo *Repo, site *SiteFacts) (out []Candidate, not
 		text  string
 	}{
 		{media, "%d documents in the media library not checked: uploaded on purpose, no name suggests people's data"},
-		{declared, "%d files in folders the repo's data-audit.json declares public not checked"},
+		{declared, "%d files under uploads the repo's data-audit.json declares public not checked"},
 		{jsons, "%d JSON files under uploads not checked: plugins' own data, no name suggests people's data"},
 		{unchecked, "%d data files in plugins, themes and core not checked: no install of the deployed commit to tell the release's own from added ones"},
 	} {

@@ -169,14 +169,22 @@ func (p *prober) file(rel string) audit.Answer {
 
 func (p *prober) head(u string) audit.Answer {
 	resp, err := p.do(http.MethodHead, u, nil, 0)
+	ranged := false
 	if err == nil && (resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented) {
 		done(resp)
 		resp, err = p.do(http.MethodGet, u, nil, 1)
+		ranged = true
 	}
 	if err != nil {
 		return audit.Answer{Err: errText(err)}
 	}
-	done(resp)
+	if ranged && resp.StatusCode != http.StatusPartialContent {
+		// The server ignored the Range: the whole file is on its way. Only the
+		// headers were wanted, so none of it is read (the connection goes).
+		resp.Body.Close()
+	} else {
+		done(resp)
+	}
 	return audit.Answer{Status: resp.StatusCode, Type: resp.Header.Get("Content-Type")}
 }
 

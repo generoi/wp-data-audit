@@ -1,8 +1,10 @@
 package audit
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"maps"
 	"os"
 	"os/exec"
@@ -255,6 +257,7 @@ func TestExposedOwnedFolders(t *testing.T) {
 		{Path: "web/app/uploads/models/mc6-t-3d/index.html", Size: 4, Mtime: 4},
 		{Path: "web/app/uploads/models/mc6-t-3d-old/index.html", Size: 5, Mtime: 5},
 		{Path: "web/app/uploads/sites/2/complianz/snapshots/policy.pdf", Size: 6, Mtime: 6}, // network-active
+		{Path: "web/app/uploads/price-list.pdf", Size: 7, Mtime: 7},                         // declared, in uploads' root
 	}}
 	served := map[string]Answer{}
 	for _, d := range f.Data {
@@ -264,7 +267,7 @@ func TestExposedOwnedFolders(t *testing.T) {
 		"1": {"wp-all-export-pro/wp-all-export-pro.php"}, "2": {"akismet/akismet.php"}, // installed or not, wp-all-import isn't active
 		"network": {"complianz-gdpr-premium/complianz-gpdr-premium.php"},
 	}}
-	repo := &Repo{PublicUploads: []string{"/models/mc6-t-3d/"}}
+	repo := &Repo{PublicUploads: []string{"/models/mc6-t-3d/", "price-list.pdf"}}
 	r := Check(Input{Facts: Facts{At: now, Site: site, Files: f, Web: &WebFacts{Base: "https://site.example", Files: served}}, Repo: repo}).Report
 	var flagged []string
 	for _, fl := range kind(r, KindExposed) {
@@ -276,7 +279,7 @@ func TestExposedOwnedFolders(t *testing.T) {
 		t.Errorf("flagged %v, want %v", flagged, want)
 	}
 	n := noteTexts(r)
-	for _, w := range []string{"1 files in wp-all-export-pro's own uploads folder", "1 files in complianz-gdpr-premium's own uploads folder", "1 files in folders the repo's data-audit.json declares public"} {
+	for _, w := range []string{"1 files in wp-all-export-pro's own uploads folder", "1 files in complianz-gdpr-premium's own uploads folder", "2 files under uploads the repo's data-audit.json declares public"} {
 		if !strings.Contains(n, w) {
 			t.Errorf("notes lack %q:\n%s", w, n)
 		}
@@ -388,6 +391,64 @@ func TestScriptAndParseSite(t *testing.T) {
 	}
 }
 
+// The collector's content scan, run on its own: a plain script or iframe
+// with an entity in it is one plain hit, not an encoded one as well; an
+// entity-encoded script is still caught as encoded.
+func TestContentScanEncoded(t *testing.T) {
+	php, err := exec.LookPath("php")
+	if err != nil {
+		t.Skip("no php")
+	}
+	_, scan, ok := strings.Cut(collector, "$wpda_self = '';")
+	scan, _, ok2 := strings.Cut(scan, "// One entry per distinct kind + value")
+	if !ok || !ok2 {
+		t.Fatal("the content scan isn't where the test looks for it in collector.php")
+	}
+	cases := map[string]struct{ text, want string }{
+		"escape helper":   {`<p>x</p><script>function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</script>`, "script-inline"},
+		"map attribution": {`<script>L.tileLayer(u,{attribution:'&copy; OpenStreetMap'})</script>`, "script-inline"},
+		"iframe query":    {`<iframe src="https://www.youtube.com/embed/x?a=1&amp;b=2"></iframe>`, "iframe"},
+		"encoded":         {`<p>&lt;script src="https://evil.example/x.js"&gt;&lt;/script&gt;</p>`, "encoded script-src"},
+		"plain and encoded": {`<script>a='&amp;'</script><p>&lt;script src="https://evil.example/x.js"&gt;&lt;/script&gt;</p>`,
+			"encoded script-src script-inline"},
+		// An unclosed script runs to the end: what's encoded after it is rescanned.
+		"unclosed": {`<script>a='&amp;'; &lt;iframe src="https://evil.example/"&gt;`, "encoded iframe encoded script-inline script-inline"},
+	}
+	in := map[string]string{}
+	for name, c := range cases {
+		in[name] = c.text
+	}
+	b, _ := json.Marshal(in)
+	p := filepath.Join(t.TempDir(), "scan.php")
+	driver := "<?php\n$wpda_self = 'site.example';" + scan + `
+$out = [];
+foreach (json_decode(stream_get_contents(STDIN), true) as $name => $text) {
+    $hits = array_map(fn ($f) => ($f[2] ? 'encoded ' : '') . $f[0], array_values($wpda_scan($text, false)));
+    sort($hits);
+    $out[$name] = implode(' ', $hits);
+}
+echo json_encode($out);
+`
+	if err := os.WriteFile(p, []byte(driver), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(php, p)
+	cmd.Stdin = bytes.NewReader(b)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("php: %v %s", err, out)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	for name, c := range cases {
+		if got[name] != c.want {
+			t.Errorf("%s: %q, want %q", name, got[name], c.want)
+		}
+	}
+}
+
 func TestReadRepo(t *testing.T) {
 	dir := t.TempDir()
 	write := func(p, s string) {
@@ -404,7 +465,7 @@ func TestReadRepo(t *testing.T) {
 		"web/app/plugins/{$name}/":["type:wordpress-plugin"]},
 		"dropin-paths":{"web/app/":["package:wp-plugin/cache:wp-cache-phase1.php"],"web/app/mu-plugins":["package:vendor/cli:plugin/login-server.php"]},
 		"patches":{"wp-plugin/fixed":{},"roots/wordpress-no-content":{},"acme/patched-fork":{}}}}`)
-	write("data-audit.json", `{"public_roles":{"members.example":["subscriber"]},"client_domains":["client.example"]}`)
+	write("data-audit.json", `{"public_roles":{"members.example":["subscriber"]},"client_domains":["client.example"],"inactive_plugins":["library"]}`)
 	write("composer.lock", `{"packages":[
 		{"name":"wp-plugin/fixed","type":"wordpress-plugin"},
 		{"name":"wp-plugin/moved","type":"wordpress-plugin"},
@@ -457,8 +518,8 @@ func TestReadRepo(t *testing.T) {
 	if !repo.PatchedCore {
 		t.Error("core patch not seen")
 	}
-	if got := repo.PublicRoles["members.example"]; len(got) != 1 || got[0] != "subscriber" || len(repo.ClientDomains) != 1 {
-		t.Errorf("data-audit settings: %v %v", repo.PublicRoles, repo.ClientDomains)
+	if got := repo.PublicRoles["members.example"]; len(got) != 1 || got[0] != "subscriber" || len(repo.ClientDomains) != 1 || !slices.Equal(repo.InactivePlugins, []string{"library"}) {
+		t.Errorf("data-audit settings: %v %v %v", repo.PublicRoles, repo.ClientDomains, repo.InactivePlugins)
 	}
 	sum := sha256.Sum256([]byte("<?php // a")) // hashed like hasher.sh's sha256sum
 	if got := repo.Local["vendor/acme/lib/A.php"]; got != hex.EncodeToString(sum[:]) {
