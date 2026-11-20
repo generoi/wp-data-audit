@@ -120,7 +120,8 @@ func readOnly(caps []string) bool {
 	return !slices.ContainsFunc(caps, func(cap string) bool { return !selfService[cap] })
 }
 
-// sessions: one flag per account and country outside the allowed list.
+// sessions: one flag per account and country outside the allowed list and
+// the repo's login_countries for that account.
 func (c *checker) sessions(u User, who string) {
 	if c.in.Geo == nil || len(c.p.AllowedCountries) == 0 {
 		return
@@ -131,7 +132,7 @@ func (c *checker) sessions(u User, who string) {
 			continue
 		}
 		cc := c.in.Geo.Country(s.IP)
-		if cc == "" || slices.Contains(c.p.AllowedCountries, cc) || seen[cc] {
+		if cc == "" || slices.Contains(c.p.AllowedCountries, cc) || c.in.Repo.loginCountry(u.ID, cc) || seen[cc] {
 			continue
 		}
 		seen[cc] = true

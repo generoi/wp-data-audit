@@ -143,16 +143,22 @@ role, while it can do no more than read. The exceptions go in the repo's
 `extra`): a client email domain that isn't the site's, or a role people get
 outside core registration (an SSO paywall), a folder or file under uploads
 that's public on purpose (a product viewer), or a plugin installed but never
-activated on purpose (another plugin loads it as a library). `public_roles`
-keys are a site's host, or its blog id on a multisite; `public_uploads` are
-paths below uploads; `inactive_plugins` are plugin folders:
+activated on purpose (another plugin loads it as a library), or an account
+that logs in from a country outside `allowed_countries` on purpose (a
+freelancer abroad). `public_roles` keys are a site's host, or its blog id on a
+multisite; `public_uploads` are paths below uploads; `inactive_plugins` are
+plugin folders; `login_countries` keys are WordPress user ids (the number in a
+`session:<id>:<country>` flag; an id, unlike an email, can't be changed from
+the site), each with the ISO codes that account may log in from, on top of
+the allowed ones. Another account from that country is still flagged:
 
 ```json
 {
   "public_roles": { "members.example": ["subscriber"] },
   "client_domains": ["client.example"],
   "public_uploads": ["models/product-3d", "price-list.pdf"],
-  "inactive_plugins": ["library-plugin"]
+  "inactive_plugins": ["library-plugin"],
+  "login_countries": { "12": ["PK"] }
 }
 ```
 
