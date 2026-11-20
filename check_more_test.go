@@ -53,6 +53,13 @@ func TestPlugins(t *testing.T) {
 	if !strings.Contains(noteTexts(r), "wordpress.org couldn't be asked about 1 plugin") {
 		t.Errorf("notes: %s", noteTexts(r))
 	}
+	// A plugin the repo declares inactive on purpose (a library) is only counted.
+	in.Repo = &Repo{InactivePlugins: []string{"hello.php"}}
+	r = Check(in).Report
+	if _, ok := onlyKind(r, KindPlugin)["plugin-inactive:hello.php"]; ok || !strings.Contains(noteTexts(r), "1 inactive plugins the repo's data-audit.json declares") {
+		t.Errorf("declared inactive: %v\n%s", onlyKind(r, KindPlugin), noteTexts(r))
+	}
+	in.Repo = nil
 	// A baseline from before plugins were collected: nothing is "new" against it.
 	in.Prev = &Baseline{}
 	for id := range onlyKind(Check(in).Report, KindPlugin) {

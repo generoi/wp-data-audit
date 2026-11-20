@@ -1,12 +1,15 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestProbeFiles(t *testing.T) {
@@ -50,6 +53,68 @@ func TestProbeFiles(t *testing.T) {
 	if strings.Contains(strings.Join(asked, "\n"), "elsewhere") {
 		t.Fatal("followed a redirect")
 	}
+}
+
+// A file is only ever asked for its headers: HEAD, or a one-byte GET where
+// HEAD isn't allowed, and nothing of a body read when the server ignores the
+// Range and sends the whole file.
+func TestProbeFilesReadNoBody(t *testing.T) {
+	big := bytes.Repeat([]byte("x"), 4<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path != "/app/uploads/a.csv" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		if r.URL.Path == "/ranged.sql" {
+			http.ServeContent(w, r, "ranged.sql", time.Time{}, bytes.NewReader(big)) // honours Range
+			return
+		}
+		w.Write(big) // ignores Range
+	}))
+	defer srv.Close()
+	var mu sync.Mutex
+	var asked []string
+	read := 0
+	client := NewClient()
+	inner := client.Transport
+	client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		resp, err := inner.RoundTrip(r)
+		if err != nil || strings.HasSuffix(r.URL.Path, "/") { // a folder's listing
+			return resp, err
+		}
+		mu.Lock()
+		asked = append(asked, r.Method+" "+r.URL.Path+" "+r.Header.Get("Range"))
+		mu.Unlock()
+		resp.Body = counted{resp.Body, func(n int) { mu.Lock(); read += n; mu.Unlock() }}
+		return resp, nil
+	})
+	w := Probe(context.Background(), client, Target{Home: srv.URL, Content: "web/app"},
+		Options{Files: []string{"web/app/uploads/a.csv", "web/dump.sql", "web/ranged.sql"}})
+	for _, p := range []string{"web/app/uploads/a.csv", "web/dump.sql", "web/ranged.sql"} {
+		if !w.Files[p].Served() {
+			t.Errorf("%s: %+v", p, w.Files[p])
+		}
+	}
+	for _, a := range asked {
+		if !strings.HasPrefix(a, "HEAD ") && !strings.HasSuffix(a, " bytes=0-0") {
+			t.Errorf("asked %q: neither HEAD nor a one-byte GET", a)
+		}
+	}
+	if read > 1 {
+		t.Errorf("read %d bytes of file bodies, want at most the one ranged byte", read)
+	}
+}
+
+type counted struct {
+	io.ReadCloser
+	add func(int)
+}
+
+func (c counted) Read(b []byte) (int, error) {
+	n, err := c.ReadCloser.Read(b)
+	c.add(n)
+	return n, err
 }
 
 // A network whose main URL is dead: a file is asked for on a site's domain,

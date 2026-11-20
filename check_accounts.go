@@ -46,7 +46,7 @@ func (c *checker) accounts() {
 			if len(known) > 0 && !domainIn(u.Email, known) {
 				msg += "; email domain outside the staff and client domains"
 			}
-			c.flag(Flag{ID: fmt.Sprintf("user:%d:%s", u.ID, short(u.Email, strings.Join(roles, ","))), Severity: sev(changed), Kind: KindUser,
+			c.flagChange(Flag{ID: fmt.Sprintf("user:%d:%s", u.ID, short(u.Email, strings.Join(roles, ","))), Severity: sev(changed), Kind: KindUser,
 				Message: msg, Untrusted: who + ", registered " + u.Registered})
 			c.sessions(u, who)
 			c.dormant(u, who, s.WPVersion)
@@ -70,7 +70,7 @@ func (c *checker) accounts() {
 				Untrusted: who + "; extra: " + strings.Join(caps, ", ")})
 		}
 		for _, p := range u.AppPasswords {
-			c.flag(Flag{ID: "app-password:" + idPart(p.UUID), Severity: sev(prev != nil && !prev.hasAppPassword(p.UUID)), Kind: KindAppPassword,
+			c.flagChange(Flag{ID: "app-password:" + idPart(p.UUID), Severity: sev(prev != nil && !prev.hasAppPassword(p.UUID)), Kind: KindAppPassword,
 				Message:   "application password",
 				Untrusted: fmt.Sprintf("%s; name %q, created %s, last used %s from %s", who, p.Name, ts(p.Created), ts(p.LastUsed), p.LastIP)})
 		}
@@ -80,7 +80,7 @@ func (c *checker) accounts() {
 	}
 	for _, k := range s.WooKeys {
 		isNew := prev != nil && !prev.hasWooKey(k)
-		c.flag(Flag{ID: fmt.Sprintf("woo-key:%d:%d:%s", k.Blog, k.ID, idPart(k.TruncatedKey)), Severity: sev(isNew && k.Permissions != "read"), Kind: KindWooKey,
+		c.flagChange(Flag{ID: fmt.Sprintf("woo-key:%d:%d:%s", k.Blog, k.ID, idPart(k.TruncatedKey)), Severity: sev(isNew && k.Permissions != "read"), Kind: KindWooKey,
 			Message:   "WooCommerce REST API key",
 			Untrusted: fmt.Sprintf("%s access, user %d, %q, last access %s", k.Permissions, k.UserID, k.Description, k.LastAccess)})
 	}

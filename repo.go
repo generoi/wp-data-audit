@@ -29,12 +29,15 @@ const ContentDir = "web/app"
 //	{
 //	    "public_roles": {"members.example": ["subscriber"]},
 //	    "client_domains": ["client.example"],
-//	    "public_uploads": ["models/product-3d"]
+//	    "public_uploads": ["models/product-3d", "price-list.pdf"],
+//	    "inactive_plugins": ["library-plugin"]
 //	}
 //
 // public_roles keys are a site's host or, on a multisite, its blog id.
-// public_uploads are folders under uploads served on purpose. A file
-// of its own, not composer.json: Composer's lock hash covers `extra`.
+// public_uploads are folders or files under uploads served on purpose;
+// inactive_plugins are plugin folders installed but never activated on
+// purpose (another plugin loads them as a library). A file of its own, not
+// composer.json: Composer's lock hash covers `extra`.
 const SettingsFile = "data-audit.json"
 
 // Repo is what the site's repo says: what it deploys (plugin, mu-plugin and
@@ -47,9 +50,11 @@ type Repo struct {
 	PatchedCore                 bool
 	PublicRoles                 map[string][]string
 	ClientDomains               []string
-	// PublicUploads are folders under uploads ("models/product-3d", or
-	// "sites/2/…" on a multisite) whose documents are public on purpose.
+	// PublicUploads are folders or files under uploads ("models/product-3d",
+	// or "sites/2/…" on a multisite) whose documents are public on purpose.
 	PublicUploads []string
+	// InactivePlugins are plugin folders installed but inactive on purpose.
+	InactivePlugins []string
 	// WPOrgPlugins are the wordpress.org slugs of the plugins it deploys
 	// from wordpress.org (wp-plugin/ or wpackagist-plugin/ packages).
 	WPOrgPlugins []string
@@ -154,12 +159,12 @@ func (r *Repo) Has(p string) bool {
 	return err == nil
 }
 
-// publicUpload reports whether rest, a path below uploads, is in one of the
-// repo's PublicUploads folders.
+// publicUpload reports whether rest, a path below uploads, is one of the
+// repo's PublicUploads files or in one of its folders.
 func (r *Repo) publicUpload(rest string) bool {
 	return r != nil && slices.ContainsFunc(r.PublicUploads, func(d string) bool {
 		d = strings.Trim(d, "/")
-		return d != "" && strings.HasPrefix(rest, d+"/")
+		return d != "" && (rest == d || strings.HasPrefix(rest, d+"/"))
 	})
 }
 
@@ -205,9 +210,10 @@ func ReadRepo(dir string) (*Repo, error) {
 		return nil, err
 	}
 	var settings struct {
-		PublicRoles   map[string][]string `json:"public_roles"`
-		ClientDomains []string            `json:"client_domains"`
-		PublicUploads []string            `json:"public_uploads"`
+		PublicRoles     map[string][]string `json:"public_roles"`
+		ClientDomains   []string            `json:"client_domains"`
+		PublicUploads   []string            `json:"public_uploads"`
+		InactivePlugins []string            `json:"inactive_plugins"`
 	}
 	if err := readJSON(filepath.Join(dir, SettingsFile), &settings); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -215,6 +221,7 @@ func ReadRepo(dir string) (*Repo, error) {
 	exp.PublicRoles = settings.PublicRoles
 	exp.ClientDomains = settings.ClientDomains
 	exp.PublicUploads = settings.PublicUploads
+	exp.InactivePlugins = settings.InactivePlugins
 	var lock struct {
 		Packages    []lockPackage `json:"packages"`
 		PackagesDev []lockPackage `json:"packages-dev"`

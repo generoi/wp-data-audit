@@ -127,6 +127,17 @@ func TestUrgencySticks(t *testing.T) {
 	}
 }
 
+// Any other flag's severity is today's rules': one an earlier run rated
+// urgent comes back down when the rules now rate it for review.
+func TestSeverityFollowsRules(t *testing.T) {
+	s := site0()
+	s.Content = []Match{{Kind: "iframe", Hash: "abc", Snippet: "maps.example", Count: 1}}
+	got := ids(judge(baselineOf(s), s, Policy{Pending: map[string]Severity{"content:abc": Urgent}}, nil))
+	if got["content:abc"] != Review {
+		t.Fatalf("content:abc %q, want review", got["content:abc"])
+	}
+}
+
 func TestAccountSignals(t *testing.T) {
 	s := site0()
 	s.Users = append(s.Users, User{ID: 9, Login: "c", Roles: []string{"customer"}, ExtraCaps: []string{"manage_options"}})
