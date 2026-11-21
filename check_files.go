@@ -206,7 +206,15 @@ func (c *checker) checksums(cs Checksums, repo *Repo) {
 			}
 		}
 	}
+	// Only a plugin composer.lock installs from wordpress.org has to match its
+	// checksums there: one from another package (premium, the vendor's own
+	// build of a free plugin) shares the slug, not the files.
+	notWPOrg := map[string]bool{}
 	for _, p := range cs.Plugins {
+		if !slices.Contains(repo.WPOrgPlugins, p.Plugin) {
+			notWPOrg[p.Plugin] = true
+			continue
+		}
 		if repo.PatchedPlugins[p.Plugin] {
 			continue
 		}
@@ -215,6 +223,9 @@ func (c *checker) checksums(cs Checksums, repo *Repo) {
 	}
 	if n := cs.PluginsSkipped; n > 0 {
 		c.info("%d plugin(s) have no wordpress.org checksums (premium or custom), so their files weren't verified", n)
+	}
+	if len(notWPOrg) > 0 {
+		c.info("wordpress.org checksums not judged for plugins composer.lock doesn't install from wordpress.org: %s", strings.Join(slices.Sorted(maps.Keys(notWPOrg)), ", "))
 	}
 }
 

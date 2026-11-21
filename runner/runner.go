@@ -413,7 +413,7 @@ func (r *run) hash(ctx context.Context) *audit.FileFacts {
 	if r.repo != nil && f.Revision != "" && r.repo.Revision != "" && !strings.HasPrefix(r.repo.Revision, f.Revision) {
 		r.repo.LoadTracked(f.Revision)
 		text := fmt.Sprintf("the checkout isn't at production's %.12s and neither git nor GitHub gave that commit's files, so files the repo ships may be flagged as exposed", f.Revision)
-		if r.repo.Tracked != nil {
+		if strings.HasPrefix(r.repo.TrackedAt, f.Revision) {
 			text = fmt.Sprintf("exposed files compared with what the repo tracks at production's %.12s (the checkout is at %.12s)", f.Revision, r.repo.Revision)
 		}
 		r.mu.Lock()
