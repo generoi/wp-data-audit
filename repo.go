@@ -82,11 +82,38 @@ type Repo struct {
 	// GitHub repo, by folder ("web/app/plugins/x"): composer.lock's ref of
 	// each, for a file the checkout's install doesn't match (AtLock).
 	Sources map[string]Source
-	dir     string // the checkout, install or not
+	// Packages are the plugins it installs from a Composer package other
+	// than wordpress.org's, by folder: where composer.lock's version is on
+	// GitHub (Repo "" when it isn't), for checksums when there's no install.
+	Packages map[string]Package
+	dir      string // the checkout, install or not
 }
 
 // Source is a package's GitHub repo ("owner/name") and composer.lock's ref.
 type Source struct{ Repo, Ref string }
+
+// Package is a plugin's Composer package, its GitHub repo and composer.lock's
+// ref there, and whether a patch is applied to it on install.
+type Package struct {
+	Name, Repo, Ref string
+	Patched         bool
+}
+
+// githubZip matches the GitHub archive URL Packagist gives as a package's
+// dist; its groups are "owner/name" and the ref.
+var githubZip = regexp.MustCompile(`^https://api\.github\.com/repos/([^/]+/[^/]+)/zipball/([^/?#]+)$`)
+
+// onGitHub is where composer.lock's version of p is on GitHub: its dist
+// archive's repo and ref, else its git source's; "" when it's on neither.
+func onGitHub(p lockPackage) (repo, ref string) {
+	if m := githubZip.FindStringSubmatch(p.Dist.URL); m != nil && p.Dist.Type == "zip" {
+		return m[1], cmp.Or(p.Dist.Reference, m[2])
+	}
+	if m := githubRepo.FindStringSubmatch(p.Source.URL); m != nil && p.Source.Type == "git" && p.Source.Reference != "" {
+		return m[1], p.Source.Reference
+	}
+	return "", ""
+}
 
 // fileAtRef is path's content in a GitHub repo at ref (gh, read only).
 var fileAtRef = func(repo, ref, path string) ([]byte, error) {
@@ -209,7 +236,7 @@ func (r *Repo) HashInstall() {
 // adds or drops a plugin shows up as a flag. Local stays nil until
 // HashInstall.
 func ReadRepo(dir string) (*Repo, error) {
-	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}, dir: dir}
+	exp := &Repo{Plugins: map[string]bool{}, MuPlugins: map[string]bool{}, Dropins: map[string]bool{}, PatchedPlugins: map[string]bool{}, Packages: map[string]Package{}, dir: dir}
 
 	var cj struct {
 		Extra struct {
@@ -251,13 +278,19 @@ func ReadRepo(dir string) (*Repo, error) {
 	folders := map[string]string{}
 	for _, p := range lock.Packages { // packages-dev aren't installed on production
 		types[p.Name] = p.Type
-		if vendor, slug, _ := strings.Cut(p.Name, "/"); p.Type == "wordpress-plugin" && (vendor == "wp-plugin" || vendor == "wpackagist-plugin") {
+		vendor, slug, _ := strings.Cut(p.Name, "/")
+		wporg := vendor == "wp-plugin" || vendor == "wpackagist-plugin"
+		if p.Type == "wordpress-plugin" && wporg {
 			exp.WPOrgPlugins = append(exp.WPOrgPlugins, slug)
 		}
 		sub := installDir(p, cj.Extra.InstallerPaths)
 		if set := where[sub]; set != nil {
 			name := cmp.Or(p.Extra.InstallerName, base(p.Name))
 			set[name] = true
+			if sub == "plugins" && !wporg {
+				repo, ref := onGitHub(p)
+				exp.Packages[name] = Package{Name: p.Name, Repo: repo, Ref: ref}
+			}
 			if m := githubRepo.FindStringSubmatch(p.Source.URL); m != nil && p.Source.Type == "git" && p.Source.Reference != "" {
 				sources[p.Name] = Source{Repo: m[1], Ref: p.Source.Reference}
 				folders[p.Name] = ContentDir + "/" + sub + "/" + name
@@ -307,6 +340,10 @@ func ReadRepo(dir string) (*Repo, error) {
 		case types[name] == "wordpress-plugin":
 			exp.PatchedPlugins[base(name)] = true
 		}
+	}
+	for folder, p := range exp.Packages {
+		p.Patched = patched[p.Name]
+		exp.Packages[folder] = p
 	}
 	exp.Sources = map[string]Source{}
 	for name, s := range sources {
@@ -462,6 +499,11 @@ type lockPackage struct {
 		URL       string `json:"url"`
 		Reference string `json:"reference"`
 	} `json:"source"`
+	Dist struct {
+		Type      string `json:"type"`
+		URL       string `json:"url"`
+		Reference string `json:"reference"`
+	} `json:"dist"`
 	Extra struct {
 		InstallerName string `json:"installer-name"` // composer/installers' folder-name override
 	} `json:"extra"`

@@ -60,8 +60,71 @@ func (c *checker) files() {
 	case c.in.Facts.Site != nil:
 		c.problem("PHP files not compared with the deployed commit: %s", repo.LocalWhy)
 		c.checksums(c.in.Facts.Site.Checksums, repo)
+		c.packages(f, repo)
 	default:
 		c.problem("PHP files not verified: %s, and the collector (wordpress.org's checksums) didn't run", repo.LocalWhy)
+		c.packages(f, repo)
+	}
+}
+
+// packages checks the plugins composer.lock installs from a GitHub package
+// against its archive at the locked ref, as checksums does wordpress.org's:
+// a PHP file changed, added or missing is flagged. A package that isn't on
+// GitHub, is patched on install, or wasn't a public download isn't checked.
+func (c *checker) packages(f *FileFacts, repo *Repo) {
+	var skipped []string
+	for _, name := range slices.Sorted(maps.Keys(repo.Packages)) {
+		p := repo.Packages[name]
+		got, fetched := c.in.Facts.Packages[name]
+		switch {
+		case p.Repo == "":
+			skipped = append(skipped, name+" (not on GitHub)")
+			continue
+		case p.Patched:
+			skipped = append(skipped, name+" (patched)")
+			continue
+		case !fetched:
+			skipped = append(skipped, name+" (not fetched)")
+			continue
+		case got.Err != "":
+			skipped = append(skipped, name+" ("+got.Err+")")
+			continue
+		}
+		dir := f.Content + "/plugins/" + name + "/"
+		var onSite []string
+		for _, path := range slices.Sorted(maps.Keys(f.Files)) {
+			if strings.HasPrefix(path, dir) {
+				onSite = append(onSite, path)
+			}
+		}
+		if len(onSite) == 0 {
+			skipped = append(skipped, name+" (no PHP files on the site)")
+			continue
+		}
+		fail := func(file, msg string) {
+			c.flag(Flag{ID: "plugin-checksum:" + idPart(name) + ":" + idPart(file), Severity: Urgent, Kind: KindChecksum,
+				Message: "plugin file fails its checksum against its GitHub package", Untrusted: name + "/" + file + ": " + msg + " (" + p.Repo + "@" + firstN(p.Ref, 12) + ")"})
+		}
+		for _, path := range onSite {
+			file := strings.TrimPrefix(path, dir)
+			want, shipped := got.Files[file]
+			switch {
+			case !shipped && f.Shapes[path]:
+				// a built asset manifest the hasher found pure data
+			case !shipped:
+				fail(file, "File was added")
+			case want != f.Files[path]:
+				fail(file, "Checksum does not match")
+			}
+		}
+		for _, file := range slices.Sorted(maps.Keys(got.Files)) {
+			if _, ok := f.Files[dir+file]; !ok && phpFile.MatchString(file) {
+				fail(file, "File is missing")
+			}
+		}
+	}
+	if len(skipped) > 0 {
+		c.info("plugin files not checked against their Composer package: %s", strings.Join(skipped, ", "))
 	}
 }
 

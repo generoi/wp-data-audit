@@ -47,7 +47,16 @@ It flags:
   GitHub's last successful `deploy_production.yml` run, else Deployer's
   `REVISION` file; a checkout a few commits ahead still counts
   when nothing deployed changed in between. Without a local install it falls
-  back to wordpress.org's checksums for core and wp.org plugins. Built asset
+  back to wordpress.org's checksums for core and wp.org plugins, and checks
+  plugins from a public GitHub package (Packagist's GitHub dist, or a git
+  source on GitHub) against that repo's archive at composer.lock's ref: the
+  zip Composer installs, `export-ignore` honoured. A changed, added or
+  missing PHP file is flagged like a wordpress.org checksum failure. Each
+  repo and ref is downloaded once, without credentials; its hashes are kept
+  in the user cache folder (`wp-data-audit/github/`). Not checked, only
+  listed in a note: a package that isn't on GitHub (Satis, premium vendors),
+  one that isn't a public download (private repo), or one that's patched on
+  install (`extra.patches`, `patches.json`). Built asset
   manifests (`*.asset.php`) are judged by shape on the server instead: pure
   data (`return array(...)` of quoted strings) is only counted, anything else
   is urgent. Wordfence's `wflogs/` data files are judged by their first line
@@ -127,8 +136,9 @@ report keeps the skipped checks' flags from the last full run.
 
 A run is a pipeline of what depends on what: the collector, then the public
 probes (they only need its URLs); the hasher, then the exposed-file probes;
-and the checkout's install hashed meanwhile. wordpress.org's checksums are
-only fetched when there's no local install to compare with. A site takes
+and the checkout's install hashed meanwhile. wordpress.org's checksums and
+GitHub package archives are only fetched when there's no local install to
+compare with. A site takes
 about as long as its hasher plus the file probes (a large multisite: about
 15 s); `-v` prints every phase and script section. SIGINT,
 SIGTERM and SIGHUP stop both scripts (ssh then ends the remote side) and
