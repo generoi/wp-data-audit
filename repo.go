@@ -72,9 +72,10 @@ type Repo struct {
 	LocalWhy string
 	// Dir is the checkout when it has a composer install (Has).
 	Dir string
-	// Tracked are the files git tracks at TrackedAt, the deployed commit,
-	// when the checkout is at another one (LoadTracked): what the release
-	// ships from the repo itself, whatever the working tree holds.
+	// Tracked are the files git tracks at TrackedAt: the checkout's commit
+	// (ReadRepo), or the deployed one when the checkout is at another
+	// (LoadTracked). What the release ships from the repo itself, whatever
+	// the working tree holds.
 	Tracked   map[string]bool
 	TrackedAt string
 	// Sources are the unpatched plugins and mu-plugins it installs from a
@@ -317,6 +318,9 @@ func ReadRepo(dir string) (*Repo, error) {
 	if rev, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output(); err == nil {
 		exp.Revision = strings.TrimSpace(string(rev))
 	}
+	// What the checkout's own commit tracks, for a checkout with no install;
+	// a run at another commit than production's reloads it at that one.
+	exp.LoadTracked(exp.Revision)
 	if _, err := os.Stat(filepath.Join(dir, "vendor", "composer", "installed.json")); err != nil {
 		exp.LocalWhy = "the checkout has no composer install"
 	} else {

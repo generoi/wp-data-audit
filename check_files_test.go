@@ -31,11 +31,14 @@ func TestUploadsAndUndeployed(t *testing.T) {
 		"web/app/object-cache.php":                   "6666",
 	})
 	f.Silence["web/app/uploads/index.php"] = true
-	repo := &Repo{Plugins: map[string]bool{"akismet": true}, MuPlugins: map[string]bool{"ours.php": true}, Dropins: map[string]bool{}, LocalWhy: "no install"}
+	repo := &Repo{Plugins: map[string]bool{"akismet": true}, MuPlugins: map[string]bool{"ours.php": true}, Dropins: map[string]bool{}, LocalWhy: "no install",
+		WPOrgPlugins: []string{"akismet", "patched"}}
 	s := site0()
 	s.Checksums = Checksums{
-		Core:    []string{"Warning: File doesn't verify against checksum: wp-includes/x.php", "Error: Couldn't get checksums from WordPress.org."},
-		Plugins: []PluginChecksum{{Plugin: "akismet", File: "a.php"}, {Plugin: "patched", File: "b.php"}}, PluginsSkipped: 2,
+		Core: []string{"Warning: File doesn't verify against checksum: wp-includes/x.php", "Error: Couldn't get checksums from WordPress.org."},
+		// wordpress-seo shares its slug with wordpress.org but is installed
+		// from the vendor's own Composer package: not judged by those sums.
+		Plugins: []PluginChecksum{{Plugin: "akismet", File: "a.php"}, {Plugin: "patched", File: "b.php"}, {Plugin: "wordpress-seo", File: "composer.json"}}, PluginsSkipped: 2,
 	}
 	repo.PatchedPlugins = map[string]bool{"patched": true}
 	r := Check(Input{Facts: Facts{At: now, Site: s, Files: f}, Repo: repo}).Report
@@ -49,11 +52,11 @@ func TestUploadsAndUndeployed(t *testing.T) {
 		t.Errorf("checksum flags %v", kind(r, KindChecksum))
 	}
 	for id := range got {
-		if strings.Contains(id, "patched") || strings.Contains(id, "kinsta") || strings.HasPrefix(id, "upload-php:index.php") {
+		if strings.Contains(id, "patched") || strings.Contains(id, "kinsta") || strings.Contains(id, "wordpress-seo") || strings.HasPrefix(id, "upload-php:index.php") {
 			t.Errorf("unexpected flag %s", id)
 		}
 	}
-	if n := noteTexts(r); !strings.Contains(n, "Couldn't get checksums") || !strings.Contains(n, "2 plugin(s)") {
+	if n := noteTexts(r); !strings.Contains(n, "Couldn't get checksums") || !strings.Contains(n, "2 plugin(s)") || !strings.Contains(n, "install from wordpress.org: wordpress-seo") {
 		t.Errorf("notes %s", n)
 	}
 }
@@ -587,5 +590,48 @@ func TestCandidatesAtDeployedCommit(t *testing.T) {
 	repo.LoadTracked("0123456789ab")
 	if repo.TrackedAt == "0123456789ab" {
 		t.Fatal("loaded a commit git doesn't have")
+	}
+}
+
+// A checkout at production's commit with no composer install (a worktree
+// whose Composer files differ from the main checkout's): what its commit
+// tracks is the release's own, with or without a known deployed commit.
+func TestCandidatesNoInstall(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	os.MkdirAll(filepath.Join(dir, "web/app/acf-json"), 0o755)
+	os.WriteFile(filepath.Join(dir, "composer.json"), []byte(`{}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "composer.lock"), []byte(`{"packages":[]}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "web/app/acf-json/group_1.json"), []byte(`{}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "web/v2.json"), []byte(`{}`), 0o644)
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "deployed")
+	deployed := git("rev-parse", "HEAD")
+
+	repo, err := ReadRepo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.Dir != "" {
+		t.Fatal("the checkout has no install")
+	}
+	for _, rev := range []string{deployed[:12], ""} {
+		f := &FileFacts{Content: "web/app", Revision: rev, Data: []DataFile{
+			{Path: "web/app/acf-json/group_1.json"},
+			{Path: "web/v2.json"},
+			{Path: "web/app/export.csv"},
+		}}
+		c, _ := Candidates(f, repo, nil)
+		if len(c) != 1 || c[0].Path != "web/app/export.csv" {
+			t.Errorf("deployed %q: candidates %v, want only the untracked export", rev, c)
+		}
 	}
 }
