@@ -23,6 +23,7 @@ import (
 
 	audit "github.com/generoi/wp-data-audit"
 	"github.com/generoi/wp-data-audit/geo"
+	"github.com/generoi/wp-data-audit/ghzip"
 	"github.com/generoi/wp-data-audit/store"
 	"github.com/generoi/wp-data-audit/web"
 	"github.com/generoi/wp-data-audit/wporg"
@@ -140,6 +141,9 @@ type Options struct {
 	Kinsta func(ctx context.Context) (*audit.KinstaAccess, error)
 	GH     GH     // gh, for the repo's collaborators and deploy keys; the real gh when nil
 	WPOrg  string // wordpress.org's plugin API; wporg.Base when ""
+	// GitHubZip is GitHub's archive host (ghzip.Base when ""), ZipCache where
+	// the archives' hashes are kept (ghzip.DefaultCache() when "").
+	GitHubZip, ZipCache string
 }
 
 // Result is a run's report (what this run judged; the saved one keeps the
@@ -273,6 +277,7 @@ func (r *run) prepare() (string, error) {
 func (r *run) gather(ctx context.Context, script string) audit.Facts {
 	facts := audit.Facts{At: r.at}
 	collector, hasher, _ := r.o.Skip.Needs()
+	local := r.repo.Comparable(r.t.Deployed) // before the hasher may move the checkout's Revision
 	var wg sync.WaitGroup
 	var where web.Target // the site's URLs, set before located is closed
 	located := make(chan struct{})
@@ -335,6 +340,19 @@ func (r *run) gather(ctx context.Context, script string) audit.Facts {
 			}
 			facts.WPOrg = wporg.Lookup(ctx, client, cmp.Or(r.o.WPOrg, wporg.Base), r.repo.WPOrgPlugins)
 			r.time("wordpress.org plugins", start)
+		})
+	}
+	// Like wordpress.org's checksums, the packages' archives only stand in for
+	// comparing with a local install.
+	if r.o.Skip.Runs(audit.Files) && r.repo != nil && len(r.repo.Packages) > 0 && !local {
+		wg.Go(func() {
+			start := time.Now()
+			client := r.o.Client
+			if client == nil {
+				client = web.NewClient()
+			}
+			facts.Packages = ghzip.Hashes(ctx, client, cmp.Or(r.o.GitHubZip, ghzip.Base), cmp.Or(r.o.ZipCache, ghzip.DefaultCache()), r.repo.Packages)
+			r.time("GitHub package archives", start)
 		})
 	}
 	wg.Wait()

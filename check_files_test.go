@@ -477,7 +477,8 @@ func TestReadRepo(t *testing.T) {
 		{"name":"vendor/lib","type":"library","source":{"type":"git","url":"https://github.com/vendor/lib.git","reference":"1111"}},
 		{"name":"acme/fork","type":"wordpress-plugin","source":{"type":"git","url":"git@github.com:acme/fork.git","reference":"fc60653"}},
 		{"name":"acme/patched-fork","type":"wordpress-plugin","source":{"type":"git","url":"https://github.com/acme/patched-fork","reference":"2222"}},
-		{"name":"acme/zip","type":"wordpress-plugin","source":{"type":"zip","url":"https://example.com/zip.zip","reference":"3333"}}],
+		{"name":"acme/zip","type":"wordpress-plugin","source":{"type":"zip","url":"https://example.com/zip.zip","reference":"3333"}},
+		{"name":"acme/dist","type":"wordpress-plugin","dist":{"type":"zip","url":"https://api.github.com/repos/acme/dist/zipball/4444","reference":"4444"}}],
 		"packages-dev":[{"name":"wp-plugin/dev-only","type":"wordpress-plugin"}]}`)
 	write("web/app/mu-plugins/local.php", "<?php")
 	write("web/app/plugins/custom/custom.php", "<?php")
@@ -511,9 +512,19 @@ func TestReadRepo(t *testing.T) {
 			}
 		}
 	}
-	check("plugins", repo.Plugins, "fixed", "custom", "renamed", "woocommerce", "fork", "patched-fork", "zip")
+	check("plugins", repo.Plugins, "fixed", "custom", "renamed", "woocommerce", "fork", "patched-fork", "zip", "dist")
 	if len(repo.Sources) != 1 || repo.Sources["web/app/plugins/fork"] != (Source{Repo: "acme/fork", Ref: "fc60653"}) {
 		t.Errorf("sources %v: only the unpatched plugin from GitHub", repo.Sources)
+	}
+	// Every plugin package but wordpress.org's, from GitHub's dist archive or git source.
+	if want := map[string]Package{
+		"renamed":      {Name: "vendor/renamed-package"},
+		"fork":         {Name: "acme/fork", Repo: "acme/fork", Ref: "fc60653"},
+		"patched-fork": {Name: "acme/patched-fork", Repo: "acme/patched-fork", Ref: "2222", Patched: true},
+		"zip":          {Name: "acme/zip"},
+		"dist":         {Name: "acme/dist", Repo: "acme/dist", Ref: "4444"},
+	}; !maps.Equal(repo.Packages, want) {
+		t.Errorf("packages %v, want %v", repo.Packages, want)
 	}
 	check("mu-plugins", repo.MuPlugins, "moved", "mu", "local.php", "login-server.php")
 	check("dropins", repo.Dropins, "object-cache.php", "wp-cache-phase1.php")

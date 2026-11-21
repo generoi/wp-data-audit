@@ -25,6 +25,16 @@ type Facts struct {
 	// WPOrg is wordpress.org's word on the repo's wordpress.org plugins, by
 	// slug; nil when it wasn't asked.
 	WPOrg map[string]WPOrgPlugin
+	// Packages are the GitHub archives of the repo's Packages at composer.lock's
+	// refs, by plugin folder; nil when they weren't fetched.
+	Packages map[string]PackageFiles
+}
+
+// PackageFiles is a package's archive as Composer installs it: its files
+// (path in the package → sha256), or Err when it couldn't be fetched.
+type PackageFiles struct {
+	Files map[string]string `json:"files,omitempty"`
+	Err   string            `json:"err,omitempty"`
 }
 
 // WPOrgPlugin is what wordpress.org says about a plugin: closed (with why
