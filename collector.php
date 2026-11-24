@@ -358,8 +358,11 @@ empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$
                 }
             }
         }
-        $sql = "SELECT f.id, f.title, COUNT(e.id) AS n, MIN(e.date_created) AS oldest FROM {$p}gf_form f
-            JOIN {$p}gf_entry e ON e.form_id = f.id AND e.status = 'active' GROUP BY f.id, f.title";
+        // Trashed entries too: Gravity Forms never empties the trash, so a
+        // form set to trash keeps every entry there.
+        $sql = "SELECT f.id, f.title, SUM(e.status = 'active') AS n, MIN(IF(e.status = 'active', e.date_created, NULL)) AS oldest,
+            SUM(e.status = 'trash') AS trashed, MIN(IF(e.status = 'trash', e.date_created, NULL)) AS trashed_oldest FROM {$p}gf_form f
+            JOIN {$p}gf_entry e ON e.form_id = f.id AND e.status IN ('active', 'trash') GROUP BY f.id, f.title";
         foreach ($wpdb->get_results($sql) as $f) {
             $r = $meta[(int) $f->id] ?? [];
             $wpda['retention']['forms'][] = [
@@ -368,6 +371,8 @@ empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$
                 'title' => substr((string) $f->title, 0, 120),
                 'entries' => (int) $f->n,
                 'oldest' => (string) $f->oldest,
+                'trashed' => (int) $f->trashed,
+                'trashed_oldest' => (string) $f->trashed_oldest,
                 'policy' => (string) ($r['policy'] ?? 'retain'),
                 'days' => (int) ($r['retain_entries_days'] ?? 0),
             ];

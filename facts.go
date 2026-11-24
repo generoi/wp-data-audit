@@ -272,14 +272,18 @@ type FormHoneypot struct {
 
 // FormRetention is one Gravity Forms form: Policy is its Personal Data
 // setting (retain, trash, delete), Days how long before trash or delete.
+// Entries and Oldest are its active entries, Trashed and TrashedOldest the
+// ones in its trash, which Gravity Forms never empties.
 type FormRetention struct {
-	Blog    int    `json:"blog"`
-	FormID  int    `json:"form_id"`
-	Title   string `json:"title"`
-	Entries int    `json:"entries"`
-	Oldest  string `json:"oldest"`
-	Policy  string `json:"policy"`
-	Days    int    `json:"days"`
+	Blog          int    `json:"blog"`
+	FormID        int    `json:"form_id"`
+	Title         string `json:"title"`
+	Entries       int    `json:"entries"`
+	Oldest        string `json:"oldest"`
+	Trashed       int    `json:"trashed"`
+	TrashedOldest string `json:"trashed_oldest"`
+	Policy        string `json:"policy"`
+	Days          int    `json:"days"`
 }
 
 // WooRetention is one shop: Settings are WooCommerce's Accounts & Privacy
