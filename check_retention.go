@@ -55,6 +55,41 @@ func (c *checker) retention() {
 				len(s.ids), s.entries, s.oldest.Format("2006-01-02")),
 			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(s.list, "; "))})
 	}
+	// Entries kept in the trash, one flag per site: Gravity Forms never
+	// empties it. A form set to trash keeps every entry there; on any other
+	// setting, a trash past RetentionAfter is entries trashed by hand.
+	type bin struct {
+		ids, list []string
+		entries   int
+		oldest    time.Time
+	}
+	bins := map[int]*bin{}
+	var binBlogs []int
+	for _, f := range r.Forms {
+		t, isOld := old(f.TrashedOldest)
+		if f.Trashed == 0 || f.Policy != "trash" && !isOld {
+			continue
+		}
+		s := bins[f.Blog]
+		if s == nil {
+			s = &bin{oldest: t}
+			bins[f.Blog] = s
+			binBlogs = append(binBlogs, f.Blog)
+		}
+		s.ids = append(s.ids, fmt.Sprint(f.FormID))
+		s.list = append(s.list, fmt.Sprintf("form %d %q (%s): %d in the trash since %s", f.FormID, f.Title, f.Policy, f.Trashed, t.Format("2006-01-02")))
+		s.entries += f.Trashed
+		if t.Before(s.oldest) {
+			s.oldest = t
+		}
+	}
+	for _, b := range binBlogs {
+		s := bins[b]
+		c.flag(Flag{ID: fmt.Sprintf("retention:trash:%d:%s", b, short(s.ids...)), Severity: Review, Kind: KindRetention,
+			Message: fmt.Sprintf("%d forms keep entries in the trash, which Gravity Forms never empties (%d in all, the oldest from %s): set their retention to delete (form settings → Personal Data), which removes trashed entries too, or empty the trash",
+				len(s.ids), s.entries, s.oldest.Format("2006-01-02")),
+			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(s.list, "; "))})
+	}
 	// Forms throwing away what their honeypot catches, one flag per site.
 	hp := map[int][]FormHoneypot{}
 	var hpBlogs []int

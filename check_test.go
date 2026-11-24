@@ -305,6 +305,25 @@ func TestRetention(t *testing.T) {
 	}
 }
 
+// Entries in the trash: a form set to trash is flagged for any, since
+// Gravity Forms never empties it; on another setting only a trash past
+// RetentionAfter (entries trashed by hand) is.
+func TestRetentionTrash(t *testing.T) {
+	s := site0()
+	s.Retention = RetentionFacts{Forms: []FormRetention{
+		{Blog: 1, FormID: 8, Title: "Task force", Trashed: 242, TrashedOldest: "2026-05-01 10:00:00", Policy: "trash", Days: 60},
+		{Blog: 1, FormID: 9, Title: "Old", Entries: 3, Oldest: "2026-10-01 10:00:00", Trashed: 10, TrashedOldest: "2020-01-01 10:00:00", Policy: "retain"},
+		{Blog: 1, FormID: 10, Title: "Recent", Trashed: 4, TrashedOldest: "2026-09-01 10:00:00", Policy: "retain"},
+		{Blog: 2, FormID: 3, Title: "Deleted", Entries: 2, Oldest: "2026-10-01 10:00:00", Policy: "delete", Days: 60},
+	}}
+	got := kind(judge(nil, s, Policy{}, nil), KindRetention)
+	if len(got) != 1 || !strings.HasPrefix(got[0].ID, "retention:trash:1:") ||
+		!strings.HasPrefix(got[0].Message, "2 forms keep entries in the trash, which Gravity Forms never empties (252 in all, the oldest from 2020-01-01)") ||
+		got[0].Untrusted != `blog 1: form 8 "Task force" (trash): 242 in the trash since 2026-05-01; form 9 "Old" (retain): 10 in the trash since 2020-01-01` {
+		t.Fatalf("trash flags %+v", got)
+	}
+}
+
 func TestPublic(t *testing.T) {
 	w := &WebFacts{Base: "https://site.example", Sites: []PublicSite{
 		{Home: "https://site.example", Users: []string{"jane"}, AuthorSlug: "jane", XMLRPC: true, Listing: true,
