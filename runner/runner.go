@@ -141,9 +141,10 @@ type Options struct {
 	Kinsta func(ctx context.Context) (*audit.KinstaAccess, error)
 	GH     GH     // gh, for the repo's collaborators and deploy keys; the real gh when nil
 	WPOrg  string // wordpress.org's plugin API; wporg.Base when ""
-	// GitHubZip is GitHub's archive host (ghzip.Base when ""), ZipCache where
-	// the archives' hashes are kept (ghzip.DefaultCache() when "").
-	GitHubZip, ZipCache string
+	// GitHubZip is GitHub's archive host (ghzip.Base when ""), GitHubRelease
+	// its release assets' (ghzip.ReleaseBase when ""), ZipCache where the
+	// archives' hashes are kept (ghzip.DefaultCache() when "").
+	GitHubZip, GitHubRelease, ZipCache string
 }
 
 // Result is a run's report (what this run judged; the saved one keeps the
@@ -351,7 +352,7 @@ func (r *run) gather(ctx context.Context, script string) audit.Facts {
 			if client == nil {
 				client = web.NewClient()
 			}
-			facts.Packages = ghzip.Hashes(ctx, client, cmp.Or(r.o.GitHubZip, ghzip.Base), cmp.Or(r.o.ZipCache, ghzip.DefaultCache()), r.repo.Packages)
+			facts.Packages = ghzip.Hashes(ctx, client, cmp.Or(r.o.GitHubZip, ghzip.Base), cmp.Or(r.o.GitHubRelease, ghzip.ReleaseBase), cmp.Or(r.o.ZipCache, ghzip.DefaultCache()), r.repo.Packages)
 			r.time("GitHub package archives", start)
 		})
 	}

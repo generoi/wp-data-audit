@@ -1,8 +1,9 @@
-// Package ghzip fetches a GitHub repo's archive at a ref, the zip Composer
-// installs a GitHub package from (export-ignore'd files left out), and hashes
-// its files. Public repos only: no credentials are sent, so a private one
-// answers 404 and is reported as not fetched. Each repo and ref is fetched
-// once: its hashes are kept in a cache folder.
+// Package ghzip fetches the zip Composer installs a GitHub package from and
+// hashes its files: the repo's archive at a ref (export-ignore'd files left
+// out), or the release asset composer.lock names as its dist. Public repos
+// only: no credentials are sent, so a private one answers 404 and is reported
+// as not fetched. Each archive is fetched once: its hashes are kept in a
+// cache folder.
 package ghzip
 
 import (
@@ -28,6 +29,9 @@ import (
 // Base is GitHub's archive host, outside the API's rate limit.
 const Base = "https://codeload.github.com"
 
+// ReleaseBase is where GitHub serves release assets.
+const ReleaseBase = "https://github.com"
+
 // maxZip is the largest archive read: far above any plugin's.
 const maxZip = 256 << 20
 
@@ -43,9 +47,11 @@ func DefaultCache() string {
 // safe matches a repo's owner or name, or a ref, that's safe as a path segment.
 var safe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
 
-// Hashes fetches every package's archive, four at a time, by plugin folder.
-// One that isn't on GitHub, or is patched on install, isn't asked for.
-func Hashes(ctx context.Context, client *http.Client, base, cache string, pkgs map[string]audit.Package) map[string]audit.PackageFiles {
+// Hashes fetches every package's archive, four at a time, by plugin folder:
+// its release asset from releases when composer.lock installs it from one,
+// else its repo's archive from base. One that isn't on GitHub, or is patched
+// on install, isn't asked for.
+func Hashes(ctx context.Context, client *http.Client, base, releases, cache string, pkgs map[string]audit.Package) map[string]audit.PackageFiles {
 	out := map[string]audit.PackageFiles{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -61,7 +67,7 @@ func Hashes(ctx context.Context, client *http.Client, base, cache string, pkgs m
 				return
 			}
 			defer func() { <-sem }()
-			files, err := one(ctx, client, base, cache, p.Repo, p.Ref)
+			files, err := one(ctx, client, base, releases, cache, p)
 			pf := audit.PackageFiles{Files: files}
 			if err != nil {
 				pf = audit.PackageFiles{Err: err.Error()}
@@ -75,19 +81,32 @@ func Hashes(ctx context.Context, client *http.Client, base, cache string, pkgs m
 	return out
 }
 
-// one is repo's archive at ref, hashed: from the cache, else fetched and
-// then cached. A failed fetch isn't cached.
-func one(ctx context.Context, client *http.Client, base, cache, repo, ref string) (map[string]string, error) {
-	owner, name, _ := strings.Cut(repo, "/")
-	if !safe.MatchString(owner) || !safe.MatchString(name) || !safe.MatchString(ref) {
-		return nil, fmt.Errorf("unexpected repo or ref %q@%q", repo, ref)
+// one is p's archive, hashed: from the cache, else fetched and then cached.
+// A failed fetch isn't cached.
+func one(ctx context.Context, client *http.Client, base, releases, cache string, p audit.Package) (map[string]string, error) {
+	owner, name, _ := strings.Cut(p.Repo, "/")
+	if !safe.MatchString(owner) || !safe.MatchString(name) {
+		return nil, fmt.Errorf("unexpected repo %q", p.Repo)
 	}
-	path := filepath.Join(cache, owner, name, ref+".json")
+	var url, key string
+	if p.Release != "" {
+		tag, file, _ := strings.Cut(p.Release, "/")
+		if !safe.MatchString(tag) || !safe.MatchString(file) {
+			return nil, fmt.Errorf("unexpected release asset %q", p.Release)
+		}
+		url, key = releases+"/"+p.Repo+"/releases/download/"+tag+"/"+file, "release-"+tag+"-"+file
+	} else {
+		if !safe.MatchString(p.Ref) {
+			return nil, fmt.Errorf("unexpected ref %q", p.Ref)
+		}
+		url, key = base+"/"+p.Repo+"/zip/"+p.Ref, p.Ref
+	}
+	path := filepath.Join(cache, owner, name, key+".json")
 	var files map[string]string
 	if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &files) == nil {
 		return files, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/"+repo+"/zip/"+ref, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -119,17 +138,31 @@ func one(ctx context.Context, client *http.Client, base, cache, repo, ref string
 	return files, nil
 }
 
-// hashZip hashes the archive's regular files, by path below its one top
-// folder ("owner-name-sha/"), the plugin's own folder once installed.
+// hashZip hashes the archive's regular files, by path in the plugin's own
+// folder once installed: below its one top folder when everything is in one
+// ("owner-name-sha/" in a repo's archive), as Composer extracts it, else from
+// its root (a release zip of the plugin's files).
 func hashZip(b []byte) (map[string]string, error) {
 	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
 	if err != nil {
 		return nil, fmt.Errorf("archive: %w", err)
 	}
+	top := ""
+	for i, f := range zr.File {
+		dir, _, ok := strings.Cut(f.Name, "/")
+		if !ok || i > 0 && dir != top {
+			top = ""
+			break
+		}
+		top = dir
+	}
 	files := map[string]string{}
 	for _, f := range zr.File {
-		_, rel, ok := strings.Cut(f.Name, "/")
-		if !ok || rel == "" || !f.Mode().IsRegular() {
+		rel := f.Name
+		if top != "" {
+			rel = strings.TrimPrefix(rel, top+"/")
+		}
+		if rel == "" || !f.Mode().IsRegular() {
 			continue
 		}
 		r, err := f.Open()
