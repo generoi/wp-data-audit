@@ -46,8 +46,13 @@ func (c *checker) accounts() {
 			if len(known) > 0 && !domainIn(u.Email, known) {
 				msg += "; email domain outside the staff and client domains"
 			}
-			c.flagChange(Flag{ID: fmt.Sprintf("user:%d:%s", u.ID, short(u.Email, strings.Join(roles, ","))), Severity: sev(changed), Kind: KindUser,
-				Message: msg, Untrusted: who + ", registered " + u.Registered})
+			// Current staff (shared logins like gadmin included) are expected on
+			// every site; only a new staff account or a role change is news, since
+			// anyone can register an admin under a staff address.
+			if changed || !c.staff[staffAddr(u.Email)] {
+				c.flagChange(Flag{ID: fmt.Sprintf("user:%d:%s", u.ID, short(u.Email, strings.Join(roles, ","))), Severity: sev(changed), Kind: KindUser,
+					Message: msg, Untrusted: who + ", registered " + u.Registered})
+			}
 			c.sessions(u, who)
 			c.dormant(u, who, s.WPVersion)
 			c.leaver(u, who)

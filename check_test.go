@@ -122,6 +122,25 @@ func TestNewAdminOutsideDomainsIsUrgent(t *testing.T) {
 	}
 }
 
+// A current staff account isn't listed for review, but a new one still is.
+func TestStaffAccountsNotFlagged(t *testing.T) {
+	p := Policy{StaffDomains: []string{"staff.example"}, StaffEmails: []string{"admin@staff.example"}}
+	for id := range ids(judge(baselineOf(site0()), site0(), p, nil)) {
+		if strings.HasPrefix(id, "user:1:") {
+			t.Errorf("unchanged staff account flagged: %s", id)
+		}
+	}
+	s := site0()
+	s.Users = append(s.Users, User{ID: 7, Login: "gadmin", Email: "admin@staff.example", Roles: []string{"administrator"}, Privileged: true})
+	var seven bool
+	for id, sev := range ids(judge(baselineOf(site0()), s, p, nil)) {
+		seven = seven || (strings.HasPrefix(id, "user:7:") && sev == Urgent)
+	}
+	if !seven {
+		t.Fatal("a new admin under a staff address wasn't flagged urgent")
+	}
+}
+
 func TestRoleChangeChangesID(t *testing.T) {
 	editor := site0()
 	editor.Users[0].Roles = []string{"editor"}
