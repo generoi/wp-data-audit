@@ -93,9 +93,13 @@ type Repo struct {
 type Source struct{ Repo, Ref string }
 
 // Package is a plugin's Composer package, its GitHub repo and composer.lock's
-// ref there, and whether a patch is applied to it on install.
+// ref there, and whether a patch is applied to it on install. Release is the
+// release asset ("<tag>/<file>.zip") composer.lock installs it from, when its
+// dist is one: a zip its release workflow built, which can leave files out
+// that the repo's archive at the ref has (tests, say).
 type Package struct {
 	Name, Repo, Ref string
+	Release         string
 	Patched         bool
 }
 
@@ -103,16 +107,24 @@ type Package struct {
 // dist; its groups are "owner/name" and the ref.
 var githubZip = regexp.MustCompile(`^https://api\.github\.com/repos/([^/]+/[^/]+)/zipball/([^/?#]+)$`)
 
+// githubRelease matches a release asset as a package's dist; its groups are
+// "owner/name" and "<tag>/<file>.zip".
+var githubRelease = regexp.MustCompile(`^https://github\.com/([^/]+/[^/]+)/releases/download/([^/?#]+/[^/?#]+\.zip)$`)
+
 // onGitHub is where composer.lock's version of p is on GitHub: its dist
-// archive's repo and ref, else its git source's; "" when it's on neither.
-func onGitHub(p lockPackage) (repo, ref string) {
+// archive's repo and ref, else its git source's, with the release asset its
+// dist is, if one; "" when it's on neither.
+func onGitHub(p lockPackage) (repo, ref, release string) {
 	if m := githubZip.FindStringSubmatch(p.Dist.URL); m != nil && p.Dist.Type == "zip" {
-		return m[1], cmp.Or(p.Dist.Reference, m[2])
+		return m[1], cmp.Or(p.Dist.Reference, m[2]), ""
+	}
+	if m := githubRelease.FindStringSubmatch(p.Dist.URL); m != nil && p.Dist.Type == "zip" {
+		return m[1], cmp.Or(p.Dist.Reference, p.Source.Reference), m[2]
 	}
 	if m := githubRepo.FindStringSubmatch(p.Source.URL); m != nil && p.Source.Type == "git" && p.Source.Reference != "" {
-		return m[1], p.Source.Reference
+		return m[1], p.Source.Reference, ""
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // fileAtRef is path's content in a GitHub repo at ref (gh, read only).
@@ -288,8 +300,8 @@ func ReadRepo(dir string) (*Repo, error) {
 			name := cmp.Or(p.Extra.InstallerName, base(p.Name))
 			set[name] = true
 			if sub == "plugins" && !wporg {
-				repo, ref := onGitHub(p)
-				exp.Packages[name] = Package{Name: p.Name, Repo: repo, Ref: ref}
+				repo, ref, release := onGitHub(p)
+				exp.Packages[name] = Package{Name: p.Name, Repo: repo, Ref: ref, Release: release}
 			}
 			if m := githubRepo.FindStringSubmatch(p.Source.URL); m != nil && p.Source.Type == "git" && p.Source.Reference != "" {
 				sources[p.Name] = Source{Repo: m[1], Ref: p.Source.Reference}
