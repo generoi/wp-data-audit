@@ -69,7 +69,7 @@ func (c *checker) files() {
 
 // packages checks the plugins composer.lock installs from a GitHub package
 // against its archive at the locked ref, as checksums does wordpress.org's:
-// a PHP file changed, added or missing is flagged. A package that isn't on
+// a PHP file changed or added is flagged, a missing one noted. A package that isn't on
 // GitHub, is patched on install, or wasn't a public download isn't checked.
 func (c *checker) packages(f *FileFacts, repo *Repo) {
 	var skipped []string
@@ -117,10 +117,16 @@ func (c *checker) packages(f *FileFacts, repo *Repo) {
 				fail(file, "Checksum does not match")
 			}
 		}
+		// A file the archive has and the site doesn't is no tampering (an
+		// install that leaves tests out, say): a note, not a flag.
+		var missing []string
 		for _, file := range slices.Sorted(maps.Keys(got.Files)) {
 			if _, ok := f.Files[dir+file]; !ok && phpFile.MatchString(file) {
-				fail(file, "File is missing")
+				missing = append(missing, file)
 			}
+		}
+		if len(missing) > 0 {
+			c.info("%s: %d PHP file(s) of its GitHub package aren't on the site (%s)", name, len(missing), strings.Join(missing[:min(len(missing), 3)], ", "))
 		}
 	}
 	if len(skipped) > 0 {

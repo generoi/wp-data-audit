@@ -43,7 +43,8 @@ func archive(t *testing.T, files map[string]string) []byte {
 }
 
 // Production's plugin files against their GitHub package's archive: an
-// unchanged plugin isn't flagged, a changed, added or missing PHP file is;
+// unchanged plugin isn't flagged, a changed or added PHP file is, a missing
+// one is a note;
 // a private, patched or non-GitHub package is only noted; a fetched archive
 // is cached, a failed one isn't.
 func TestPackagesChecked(t *testing.T) {
@@ -120,7 +121,7 @@ func TestPackagesChecked(t *testing.T) {
 		}
 	}
 	slices.Sort(ids)
-	if want := "plugin-checksum:edited:edited.php plugin-checksum:edited:inc/gone.php plugin-checksum:edited:inc/shell.php"; strings.Join(ids, " ") != want {
+	if want := "plugin-checksum:edited:edited.php plugin-checksum:edited:inc/shell.php"; strings.Join(ids, " ") != want {
 		t.Errorf("checksum flags %v, want %s", ids, want)
 	}
 	var notes []string
@@ -128,7 +129,7 @@ func TestPackagesChecked(t *testing.T) {
 		notes = append(notes, n.Text)
 	}
 	n := strings.Join(notes, "\n")
-	for _, want := range []string{"login (not a public download (401", "patched (patched)", "premium (not on GitHub)", "private (not a public download (404"} {
+	for _, want := range []string{"login (not a public download (401", "patched (patched)", "premium (not on GitHub)", "private (not a public download (404", "edited: 1 PHP file(s) of its GitHub package aren't on the site (inc/gone.php)"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("notes lack %q:\n%s", want, n)
 		}
