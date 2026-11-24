@@ -23,7 +23,8 @@ var wp68 = time.Date(2025, 4, 15, 0, 0, 0, 0, time.UTC)
 func (c *checker) accounts() {
 	s, prev := c.in.Facts.Site, c.in.Prev
 	c.registration(s)
-	known := append(slices.Clone(c.p.StaffDomains), c.clientDomains()...)
+	clients := c.clientDomains()
+	known := append(slices.Clone(c.p.StaffDomains), clients...)
 	if len(known) == 0 {
 		c.info("no staff or client email domains configured: email domains not checked")
 	}
@@ -46,10 +47,11 @@ func (c *checker) accounts() {
 			if len(known) > 0 && !domainIn(u.Email, known) {
 				msg += "; email domain outside the staff and client domains"
 			}
-			// Current staff (shared logins like gadmin included) are expected on
-			// every site; only a new staff account or a role change is news, since
-			// anyone can register an admin under a staff address.
-			if changed || !c.staff[staffAddr(u.Email)] {
+			// Current staff (shared logins like gadmin included) and the client's
+			// own domain (shared mailboxes too) are expected; only a new account
+			// or a role change there is news, since anyone can register an admin
+			// under such an address.
+			if changed || !(c.staff[staffAddr(u.Email)] || domainIn(u.Email, clients)) {
 				c.flagChange(Flag{ID: fmt.Sprintf("user:%d:%s", u.ID, short(u.Email, strings.Join(roles, ","))), Severity: sev(changed), Kind: KindUser,
 					Message: msg, Untrusted: who + ", registered " + u.Registered})
 			}

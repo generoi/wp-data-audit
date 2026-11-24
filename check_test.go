@@ -141,6 +141,25 @@ func TestStaffAccountsNotFlagged(t *testing.T) {
 	}
 }
 
+// An account on the client's domain isn't listed either, but a new one is.
+func TestClientDomainAccountsNotFlagged(t *testing.T) {
+	s := site0()
+	s.Users = append(s.Users, User{ID: 7, Login: "office", Email: "office@client.example", Roles: []string{"administrator"}, Privileged: true})
+	repo := &Repo{ClientDomains: []string{"client.example"}}
+	for id := range ids(judge(baselineOf(s), s, Policy{}, repo)) {
+		if strings.HasPrefix(id, "user:7:") {
+			t.Errorf("unchanged client-domain account flagged: %s", id)
+		}
+	}
+	var seven bool
+	for id, sev := range ids(judge(baselineOf(site0()), s, Policy{}, repo)) {
+		seven = seven || (strings.HasPrefix(id, "user:7:") && sev == Urgent)
+	}
+	if !seven {
+		t.Fatal("a new admin on the client domain wasn't flagged urgent")
+	}
+}
+
 func TestRoleChangeChangesID(t *testing.T) {
 	editor := site0()
 	editor.Users[0].Roles = []string{"editor"}
