@@ -47,11 +47,12 @@ func (c *checker) accounts() {
 			if len(known) > 0 && !domainIn(u.Email, known) {
 				msg += "; email domain outside the staff and client domains"
 			}
-			// Current staff (shared logins like gadmin included) and the client's
-			// own domain (shared mailboxes too) are expected; only a new account
+			// Current staff (shared logins like gadmin included), the client's
+			// own domain (shared mailboxes too) and the vendor login of a plugin
+			// the repo deploys and the site runs are expected; only a new account
 			// or a role change there is news, since anyone can register an admin
 			// under such an address.
-			if changed || !(c.staff[staffAddr(u.Email)] || domainIn(u.Email, clients)) {
+			if changed || !(c.staff[staffAddr(u.Email)] || domainIn(u.Email, clients) || c.vendorAccount(u.Email, active)) {
 				c.flagChange(Flag{ID: fmt.Sprintf("user:%d:%s", u.ID, short(u.Email, strings.Join(roles, ","))), Severity: sev(changed), Kind: KindUser,
 					Message: msg, Untrusted: who + ", registered " + u.Registered})
 			}
@@ -91,6 +92,24 @@ func (c *checker) accounts() {
 			Message:   "WooCommerce REST API key",
 			Untrusted: fmt.Sprintf("%s access, user %d, %q, last access %s", k.Permissions, k.UserID, k.Description, k.LastAccess)})
 	}
+}
+
+// vendorDomains are services whose plugin (by folder) needs the vendor's own
+// admin login on the site: SEO AI WP works through its support@ account.
+var vendorDomains = map[string]string{"seoaiwp": "wpseoai.com"}
+
+// vendorAccount reports whether email is the vendor login of a plugin the
+// repo deploys and the site has active.
+func (c *checker) vendorAccount(email string, active map[string]bool) bool {
+	if c.in.Repo == nil {
+		return false
+	}
+	for plugin, domain := range vendorDomains {
+		if c.in.Repo.Plugins[plugin] && active[plugin] && domainIn(email, []string{domain}) {
+			return true
+		}
+	}
+	return false
 }
 
 // registration: a public role whose users are only counted mustn't grant

@@ -160,6 +160,37 @@ func TestClientDomainAccountsNotFlagged(t *testing.T) {
 	}
 }
 
+// A vendor's login is expected while the repo deploys its plugin and the site
+// runs it; without the plugin, or new, it's listed.
+func TestVendorPluginAccountNotFlagged(t *testing.T) {
+	s := site0()
+	s.Users = append(s.Users, User{ID: 7, Login: "wpseoai", Email: "support@wpseoai.com", Roles: []string{"administrator"}, Privileged: true})
+	s.ActivePlugins = map[string][]string{"1": {"seoaiwp/seoaiwp.php"}}
+	flagged := func(prev, s *SiteFacts, repo *Repo) Severity {
+		for id, sev := range ids(judge(baselineOf(prev), s, Policy{}, repo)) {
+			if strings.HasPrefix(id, "user:7:") {
+				return sev
+			}
+		}
+		return ""
+	}
+	deploys := &Repo{Plugins: map[string]bool{"seoaiwp": true}}
+	if sev := flagged(s, s, deploys); sev != "" {
+		t.Errorf("vendor login of a deployed, active plugin flagged %s", sev)
+	}
+	if flagged(s, s, &Repo{Plugins: map[string]bool{}}) == "" {
+		t.Error("vendor login flagged nothing though the repo doesn't deploy its plugin")
+	}
+	inactive := site0()
+	inactive.Users = s.Users
+	if flagged(inactive, inactive, deploys) == "" {
+		t.Error("vendor login flagged nothing though its plugin isn't active")
+	}
+	if flagged(site0(), s, deploys) != Urgent {
+		t.Error("a new vendor admin wasn't flagged urgent")
+	}
+}
+
 func TestRoleChangeChangesID(t *testing.T) {
 	editor := site0()
 	editor.Users[0].Roles = []string{"editor"}
