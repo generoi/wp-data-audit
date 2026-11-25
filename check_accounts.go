@@ -170,7 +170,12 @@ func (c *checker) sessions(u User, who string) {
 
 // dormant: a listed account with no sign of use in DormantAfter. With none
 // on record, a phpass hash on 6.8+ means no password login since 6.8.
+// Current staff are skipped: an unused staff login is a colleague who rarely
+// works on the site, and leaver catches the ones who've gone.
 func (c *checker) dormant(u User, who, wpVersion string) {
+	if c.staff[staffAddr(u.Email)] {
+		return
+	}
 	now := c.now()
 	registered, _ := time.Parse("2006-01-02 15:04:05", u.Registered)
 	old := !registered.IsZero() && now.Sub(registered) > DormantAfter
