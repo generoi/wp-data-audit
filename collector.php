@@ -301,11 +301,37 @@ foreach (defined('WP_PLUGIN_DIR') && is_dir(WP_PLUGIN_DIR) ? (scandir(WP_PLUGIN_
     }
 }
 $wpda['cron'] = [];
+// Scheduled hooks WordPress itself handles: a core function is hooked to
+// them. Plugins aren't loaded here, so a callback found is core's.
+$wpda_core = static function (string $hook): bool {
+    global $wp_filter;
+    if (!isset($wp_filter[$hook])) {
+        return false;
+    }
+    foreach ($wp_filter[$hook]->callbacks as $callbacks) {
+        foreach ($callbacks as $cb) {
+            try {
+                $f = $cb['function'];
+                $r = is_array($f) ? new ReflectionMethod($f[0], $f[1]) : (($f instanceof Closure || (is_string($f) && strpos($f, '::') === false)) ? new ReflectionFunction($f) : null);
+            } catch (Throwable $e) {
+                $r = null;
+            }
+            $file = $r ? str_replace('\\', '/', (string) $r->getFileName()) : '';
+            foreach ([ABSPATH . WPINC . '/', ABSPATH . 'wp-admin/'] as $dir) {
+                if ($file !== '' && strpos($file, str_replace('\\', '/', $dir)) === 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+};
+$wpda['cron_core'] = [];
 $wpda['sensitive'] = [];
 if (is_multisite()) {
     $wpda['active_plugins']['network'] = array_map('strval', array_keys((array) get_site_option('active_sitewide_plugins', [])));
 }
-$wpda_each(function (int $blog) use ($wpdb, &$wpda, $wpda_tag) {
+$wpda_each(function (int $blog) use ($wpdb, &$wpda, $wpda_tag, $wpda_core) {
     $wpda['active_plugins'][(string) $blog] = array_values(array_map('strval', (array) get_option('active_plugins', [])));
     $hooks = [];
     foreach ((array) (function_exists('_get_cron_array') ? _get_cron_array() : []) as $events) {
@@ -315,6 +341,7 @@ $wpda_each(function (int $blog) use ($wpdb, &$wpda, $wpda_tag) {
     }
     ksort($hooks);
     $wpda['cron'][(string) $blog] = array_keys($hooks);
+    $wpda['cron_core'][(string) $blog] = array_values(array_filter(array_keys($hooks), $wpda_core));
     // Theme, upload paths, role definitions, SMTP plugins' settings, and each
     // payment gateway's settings (WooCommerce's gateway order names them).
     $names = ['template', 'stylesheet', 'upload_path', 'upload_url_path', $wpdb->prefix . 'user_roles',
@@ -333,6 +360,7 @@ $wpda_each(function (int $blog) use ($wpdb, &$wpda, $wpda_tag) {
 });
 $wpda['active_plugins'] = (object) $wpda['active_plugins'];
 $wpda['cron'] = (object) $wpda['cron'];
+$wpda['cron_core'] = (object) $wpda['cron_core'];
 $wpda['sensitive'] = (object) $wpda['sensitive'];
 $wpda_timed('plugins');
 

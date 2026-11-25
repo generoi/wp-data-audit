@@ -38,7 +38,7 @@ const usage = `usage:
       --collector, --hasher judge saved outputs instead (- for stdin).
   wp-data-audit accept --reason WHY [--everywhere] [--env production] [--repo DIR] ID...
       accept flags from the last audit; they stay quiet until what they describe changes.
-      --everywhere: content flags (a script or iframe host) and Kinsta users, on every site
+      --everywhere: content flags (a script or iframe host), Kinsta users and stale plugins, on every site
   wp-data-audit accepted [--env production] [--repo DIR] [--json]
       list the accepted flags (this site's and every site's): who, when, why, what they said
   wp-data-audit script collector|hasher [--repo DIR] [--only|--skip CHECKS]
@@ -111,7 +111,7 @@ func checkFlags(fs *flag.FlagSet) func() (audit.Skip, error) {
 func accept(args []string) error {
 	fs, target := flags("accept")
 	reason := fs.String("reason", "", "why these are expected (required)")
-	everywhere := fs.Bool("everywhere", false, "accept content and Kinsta user flags on every site")
+	everywhere := fs.Bool("everywhere", false, "accept content, Kinsta user and stale plugin flags on every site")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

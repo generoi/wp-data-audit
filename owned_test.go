@@ -51,6 +51,23 @@ func TestPluginOwnedCron(t *testing.T) {
 	}
 }
 
+// A new hook a core function handles (a WordPress update scheduled it) is
+// counted; one with the same kind of name and no core function is flagged.
+func TestCoreCron(t *testing.T) {
+	s := site0()
+	s.Cron = map[string][]string{"1": {"wp_privacy_personal_data_cleanup_requests", "wp_evil_cleanup"}}
+	s.CronCore = map[string][]string{"1": {"wp_privacy_personal_data_cleanup_requests"}}
+	prev := &Baseline{Options: s.Options, Cron: map[string][]string{"1": {}}}
+	r := Check(Input{Facts: Facts{At: now, Site: s}, Prev: prev}).Report
+	got := ids(r)
+	if got["cron:1:wp_evil_cleanup"] != Review || got["cron:1:wp_privacy_personal_data_cleanup_requests"] != "" {
+		t.Fatalf("cron flags %v", got)
+	}
+	if !strings.Contains(noteTexts(r), "1 new scheduled hooks are handled by WordPress core functions") {
+		t.Errorf("notes %s", noteTexts(r))
+	}
+}
+
 // WPML's Twig cache under uploads is counted while WPML is active, only in
 // its exact shape; anything else there stays urgent.
 func TestPluginOwnedUploadsPHP(t *testing.T) {

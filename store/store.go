@@ -172,8 +172,9 @@ func (s Store) Accepted(k Key) (map[string]bool, error) {
 // Accept records flags from k's last report as accepted: they stay quiet
 // until what they describe changes. Only a person decides this, and says
 // why. everywhere accepts content flags (a script or iframe host, an inline
-// snippet) and Kinsta user flags on every site: their IDs are the same on
-// each (the value's hash; the user's email and role).
+// snippet), Kinsta user flags and stale plugin flags on every site: their
+// IDs are the same on each (the value's hash; the user's email and role;
+// the plugin's slug and last release, so a new release ends it).
 func (s Store) Accept(k Key, ids []string, reason, by string, everywhere bool) error {
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("accept: say why (the reason is what the next audit's triage reads)")
@@ -201,8 +202,8 @@ func (s Store) Accept(k Key, ids []string, reason, by string, everywhere bool) e
 			return fmt.Errorf("%s isn't a flag in the last audit of %s @%s", id, k.Site, k.Env)
 		}
 		f := last.Flags[i]
-		if everywhere && f.Kind != audit.KindContent && f.Kind != audit.KindKinstaUser {
-			return fmt.Errorf("%s: only content and Kinsta user flags can be accepted everywhere", id)
+		if everywhere && f.Kind != audit.KindContent && f.Kind != audit.KindKinstaUser && !strings.HasPrefix(id, "plugin-stale:") {
+			return fmt.Errorf("%s: only content, Kinsta user and stale plugin flags can be accepted everywhere", id)
 		}
 		list = slices.DeleteFunc(list, func(d Decision) bool { return d.ID == id })
 		list = append(list, Decision{ID: id, Reason: reason, By: by, At: time.Now().UTC(), Flag: f.Message + ": " + f.Untrusted})

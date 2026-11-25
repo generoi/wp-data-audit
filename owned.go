@@ -29,6 +29,7 @@ var pluginsOwn = map[string]pluginOwn{
 	"woocommerce":                {hooks: []string{"woocommerce_", "wc_"}},
 	"gravityforms":               {hooks: []string{"gravityforms_", "gform_"}},
 	"redirection":                {hooks: []string{"redirection_"}},
+	"seoaiwp":                    {hooks: []string{"seoaic_", "seoaiwp_"}},
 }
 
 // activeFolders are the folders of the plugins active on blog ("" for any

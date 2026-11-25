@@ -80,13 +80,14 @@ func (c *checker) sensitive() {
 // cron: a scheduled hook on a site that the last audit didn't see, flagged
 // until accepted. Backdoors often schedule themselves to come back. A hook
 // with the prefix of a plugin active on that site is the plugin's own (an
-// update adds them), so it's only counted.
+// update adds them), so it's only counted, and so is one a core function
+// handles (a WordPress update adds those).
 func (c *checker) cron() {
 	prev := c.in.Prev
 	if prev == nil || prev.Cron == nil {
 		return
 	}
-	plugins := 0
+	plugins, core := 0, 0
 	for _, blog := range slices.Sorted(maps.Keys(c.in.Facts.Site.Cron)) {
 		was, ok := prev.Cron[blog]
 		active := c.activeFolders(blog)
@@ -94,6 +95,10 @@ func (c *checker) cron() {
 			id := "cron:" + blog + ":" + idPart(hook)
 			if (!ok || slices.Contains(was, hook)) && c.p.Pending[id] == "" {
 				continue // a site the last audit didn't have: its hooks aren't news
+			}
+			if slices.Contains(c.in.Facts.Site.CronCore[blog], hook) {
+				core++
+				continue
 			}
 			if ownedHook(active, hook) {
 				plugins++
@@ -105,5 +110,8 @@ func (c *checker) cron() {
 	}
 	if plugins > 0 {
 		c.info("%d new scheduled hooks belong to active plugins (by their prefix, such as Yoast's wpseo_): not flagged", plugins)
+	}
+	if core > 0 {
+		c.info("%d new scheduled hooks are handled by WordPress core functions: not flagged", core)
 	}
 }
