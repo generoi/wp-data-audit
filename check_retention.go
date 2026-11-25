@@ -126,6 +126,41 @@ func (c *checker) retention() {
 			Message: fmt.Sprintf("Gravity Forms' state token lasts %d h, so every submission from a page cached longer is rejected: set gform_state_lifespan to 366 days in a mu-plugin (a theme's filter doesn't count here)", least/3600),
 			Untrusted: "blogs " + strings.Join(brief, ", ")})
 	}
+	// Upload files no entry references, one flag per site: the entries were
+	// deleted but Gravity Forms left their files, so personal data outlives
+	// the retention the form promises.
+	orphans := map[int][]OrphanUploads{}
+	var orphanBlogs []int
+	for _, o := range r.OrphanUploads {
+		if orphans[o.Blog] == nil {
+			orphanBlogs = append(orphanBlogs, o.Blog)
+		}
+		orphans[o.Blog] = append(orphans[o.Blog], o)
+	}
+	for _, b := range orphanBlogs {
+		var ids, list []string
+		files, bytes, oldest := 0, int64(0), ""
+		for _, o := range orphans[b] {
+			ids = append(ids, fmt.Sprint(o.FormID))
+			list = append(list, fmt.Sprintf("form %d: %d files since %s", o.FormID, o.Files, o.Oldest))
+			files += o.Files
+			bytes += o.Bytes
+			if oldest == "" || o.Oldest < oldest {
+				oldest = o.Oldest
+			}
+		}
+		c.flag(Flag{ID: fmt.Sprintf("retention:orphan-uploads:%d:%s", b, short(ids...)), Severity: Review, Kind: KindRetention,
+			Message: fmt.Sprintf("%d Gravity Forms upload files belong to no entry (%.0f MB, the oldest from %s), so they outlived their entries: delete them, and check the upload host flag if there is one",
+				files, float64(bytes)/1048576, oldest),
+			Untrusted: fmt.Sprintf("blog %d: %s", b, strings.Join(list, "; "))})
+	}
+	// Upload links on another host than the uploads URL, one flag per site
+	// and host: Gravity Forms won't delete those files with their entry.
+	for _, h := range r.UploadHosts {
+		c.flag(Flag{ID: fmt.Sprintf("retention:upload-host:%d:%s", h.Blog, idPart(h.Host)), Severity: Review, Kind: KindRetention,
+			Message:   fmt.Sprintf("%d Gravity Forms upload links use another host than the uploads URL, so Gravity Forms won't delete those files when it deletes the entry: serve the site on one host (redirect the other) and rewrite the stored links", h.Links),
+			Untrusted: fmt.Sprintf("blog %d: links on %s, uploads on %s", h.Blog, h.Host, h.UploadHost)})
+	}
 	for _, b := range r.CleanTalkDeletes {
 		c.flag(Flag{ID: fmt.Sprintf("retention:cleantalk:%d", b), Severity: Review, Kind: KindRetention,
 			Message:   "CleanTalk deletes the Gravity Forms entries it judges spam, so a real person it catches is lost unseen: turn on its setting to save Gravity Forms spam",

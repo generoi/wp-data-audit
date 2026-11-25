@@ -253,6 +253,29 @@ type RetentionFacts struct {
 	// StateLifespan is, per blog with Gravity Forms active, how long its
 	// state token stays valid as mu-plugins set it (gform_state_lifespan).
 	StateLifespan []StateLifespan `json:"state_lifespan"`
+	// OrphanUploads are, per form, Gravity Forms upload files no entry
+	// references; UploadHosts the entries' upload links on another host than
+	// the uploads URL, whose files Gravity Forms won't delete with the entry.
+	OrphanUploads []OrphanUploads `json:"orphan_uploads"`
+	UploadHosts   []UploadHost    `json:"upload_hosts"`
+}
+
+// OrphanUploads is one form's upload files that no entry references.
+type OrphanUploads struct {
+	Blog   int    `json:"blog"`
+	FormID int    `json:"form_id"`
+	Files  int    `json:"files"`
+	Bytes  int64  `json:"bytes"`
+	Oldest string `json:"oldest"`
+}
+
+// UploadHost is a host other than the uploads URL's that entries' upload
+// links use, and how many links.
+type UploadHost struct {
+	Blog       int    `json:"blog"`
+	Host       string `json:"host"`
+	Links      int    `json:"links"`
+	UploadHost string `json:"upload_host"`
 }
 
 // StateLifespan is one blog's Gravity Forms state token lifespan.
