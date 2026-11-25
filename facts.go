@@ -117,6 +117,7 @@ type SiteFacts struct {
 	InstalledPlugins []string            `json:"installed_plugins"` // the plugin folder's entries: folders and single-file plugins
 	ActivePlugins    map[string][]string `json:"active_plugins"`    // blog id (or "network") → plugin files ("akismet/akismet.php")
 	Cron             map[string][]string `json:"cron"`           // blog id → scheduled hook names
+	CronCore         map[string][]string `json:"cron_core"`      // blog id → those a core function handles
 	Sensitive        map[string]string   `json:"sensitive"`      // option (blog-tagged) → its value's hash
 	// LinkedUploads are the files below uploads that published posts and their
 	// fields link to (every blog's), as paths below uploads: linked on purpose.
