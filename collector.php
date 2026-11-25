@@ -341,7 +341,7 @@ $wpda_timed('plugins');
 // oldest order and the anonymise/delete settings. Counts and dates only.
 // Also every active form whose honeypot throws a caught submission away
 // instead of keeping it as spam: a real person caught by it is lost unseen.
-$wpda['retention'] = ['forms' => [], 'woo' => [], 'honeypot' => [], 'cleantalk_deletes' => [], 'state_lifespan' => []];
+$wpda['retention'] = ['forms' => [], 'woo' => [], 'honeypot' => [], 'cleantalk_deletes' => [], 'state_lifespan' => [], 'orphan_uploads' => [], 'upload_hosts' => []];
 empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$wpda) {
     $has = fn (string $t) => (bool) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($t)));
     $p = $wpdb->prefix;
@@ -376,6 +376,54 @@ empty($wpda_skip['retention']) && $wpda_each(function (int $blog) use ($wpdb, &$
                 'policy' => (string) ($r['policy'] ?? 'retain'),
                 'days' => (int) ($r['retain_entries_days'] ?? 0),
             ];
+        }
+        // Uploads no entry references: Gravity Forms deletes an entry's files
+        // only when their URL is under the uploads URL, so files of entries
+        // stored on another host (www, an old domain) outlive the entry. Per
+        // form the count, bytes and oldest date; files changed in the last
+        // two days are skipped, as their entry may still be saving.
+        $up = wp_upload_dir();
+        $root = $up['basedir'] . '/gravity_forms';
+        if (is_dir($root) && $has("{$p}gf_entry_meta")) {
+            $refs = [];
+            $uploadHost = strtolower((string) parse_url($up['baseurl'], PHP_URL_HOST));
+            $hosts = [];
+            foreach ($wpdb->get_col("SELECT meta_value FROM {$p}gf_entry_meta WHERE meta_value LIKE '%gravity\\_forms%'") as $v) {
+                preg_match_all('#(?:https?://([^/"\'\s]+))?[^"\'\s]*?/gravity_forms/([^"\'\s\]\\\\|]+)#i', stripslashes((string) $v), $m, PREG_SET_ORDER);
+                foreach ($m as $hit) {
+                    $refs[rawurldecode($hit[2])] = true;
+                    $h = strtolower($hit[1] ?? '');
+                    if ($h !== '' && $h !== $uploadHost) {
+                        $hosts[$h] = ($hosts[$h] ?? 0) + 1;
+                    }
+                }
+            }
+            foreach ($hosts as $h => $n) {
+                $wpda['retention']['upload_hosts'][] = ['blog' => $blog, 'host' => $h, 'links' => $n, 'upload_host' => $uploadHost];
+            }
+            $cutoff = time() - 2 * DAY_IN_SECONDS;
+            foreach ((array) glob($root . '/*', GLOB_ONLYDIR) as $dir) {
+                if (!preg_match('/^(\d+)-[0-9a-f]{32}$/', basename($dir), $fm)) {
+                    continue;
+                }
+                $files = 0; $bytes = 0; $oldest = 0;
+                $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS));
+                foreach ($it as $f) {
+                    $name = $f->getFilename();
+                    if (!$f->isFile() || $name === 'index.html' || $name === '.htaccess' || $f->getMTime() > $cutoff) {
+                        continue;
+                    }
+                    if (!empty($refs[ltrim(substr($f->getPathname(), strlen($root)), '/')])) {
+                        continue;
+                    }
+                    $files++;
+                    $bytes += $f->getSize();
+                    $oldest = $oldest === 0 ? $f->getMTime() : min($oldest, $f->getMTime());
+                }
+                if ($files > 0) {
+                    $wpda['retention']['orphan_uploads'][] = ['blog' => $blog, 'form_id' => (int) $fm[1], 'files' => $files, 'bytes' => $bytes, 'oldest' => gmdate('Y-m-d', $oldest)];
+                }
+            }
         }
         // CleanTalk deletes the Gravity Forms entries it judges spam unless
         // its "save spam" setting is on.

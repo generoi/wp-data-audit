@@ -395,6 +395,27 @@ func TestRetentionTrash(t *testing.T) {
 	}
 }
 
+// Upload files no entry references, and upload links on another host than
+// the uploads URL (whose files Gravity Forms won't delete): one flag per site.
+func TestRetentionOrphanUploads(t *testing.T) {
+	s := site0()
+	s.Retention = RetentionFacts{
+		OrphanUploads: []OrphanUploads{
+			{Blog: 1, FormID: 1, Files: 7900, Bytes: 22 << 30, Oldest: "2021-04-13"},
+			{Blog: 1, FormID: 3, Files: 9, Bytes: 20 << 20, Oldest: "2026-11-02"},
+		},
+		UploadHosts: []UploadHost{{Blog: 1, Host: "www.client.example", Links: 19, UploadHost: "client.example"}},
+	}
+	got := kind(judge(nil, s, Policy{}, nil), KindRetention)
+	if len(got) != 2 || !strings.HasPrefix(got[0].ID, "retention:orphan-uploads:1:") ||
+		!strings.HasPrefix(got[0].Message, "7909 Gravity Forms upload files belong to no entry (22548 MB, the oldest from 2021-04-13)") ||
+		got[0].Untrusted != "blog 1: form 1: 7900 files since 2021-04-13; form 3: 9 files since 2026-11-02" ||
+		!strings.HasPrefix(got[1].ID, "retention:upload-host:1:") || !strings.HasPrefix(got[1].Message, "19 Gravity Forms upload links use another host") ||
+		got[1].Untrusted != "blog 1: links on www.client.example, uploads on client.example" {
+		t.Fatalf("orphan upload flags %+v", got)
+	}
+}
+
 func TestPublic(t *testing.T) {
 	w := &WebFacts{Base: "https://site.example", Sites: []PublicSite{
 		{Home: "https://site.example", Users: []string{"jane"}, AuthorSlug: "jane", XMLRPC: true, Listing: true,
