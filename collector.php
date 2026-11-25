@@ -627,8 +627,9 @@ empty($wpda_skip['content']) && $wpda_each(function (int $blog) use ($wpdb, $wpd
     $wpda_cur_blog = $blog;
     $wpda_self = strtolower((string) parse_url(home_url(), PHP_URL_HOST));
     // Trashed posts are seen by no one and emptied after 30 days; a restore is
-    // a change the next run scans.
-    $wpda_query("SELECT ID AS wpda_k, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type <> 'revision' AND post_status <> 'trash' AND ", 'ID', ['post_title', 'post_content', 'post_excerpt'], function ($r) use ($wpda_record) {
+    // a change the next run scans. oembed_cache posts are WordPress's cache of
+    // a provider's embed HTML for a URL in content, like _oembed_* postmeta.
+    $wpda_query("SELECT ID AS wpda_k, post_title, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_type NOT IN ('revision', 'oembed_cache') AND post_status <> 'trash' AND ", 'ID', ['post_title', 'post_content', 'post_excerpt'], function ($r) use ($wpda_record) {
         $wpda_record('posts', (int) $r->wpda_k, 'post_title', '', $r->post_title);
         $wpda_record('posts', (int) $r->wpda_k, 'post_content', '', $r->post_content);
         $wpda_record('posts', (int) $r->wpda_k, 'post_excerpt', '', $r->post_excerpt);
