@@ -30,6 +30,7 @@ var pluginsOwn = map[string]pluginOwn{
 	"gravityforms":               {hooks: []string{"gravityforms_", "gform_"}},
 	"redirection":                {hooks: []string{"redirection_"}},
 	"seoaiwp":                    {hooks: []string{"seoaic_", "seoaiwp_"}},
+	"ns-cloner-site-copier":      {hooks: []string{"ns_cloner"}},
 }
 
 // activeFolders are the folders of the plugins active on blog ("" for any
