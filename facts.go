@@ -374,7 +374,8 @@ type Listing struct {
 }
 
 // PublicSite is one home URL's answers. Users are the REST API's user slugs
-// (empty when it doesn't list them); AuthorSlug is where ?author=1 redirects.
+// (empty when it doesn't list them); AuthorSlug is where ?author=1 redirects;
+// Trackers are the trackers its landing page starts before any consent.
 type PublicSite struct {
 	Home       string    `json:"home"`
 	Err        string    `json:"err,omitempty"` // the home page didn't answer
@@ -384,6 +385,7 @@ type PublicSite struct {
 	Listing    bool      `json:"uploads_listing"`
 	Headers    []string  `json:"missing_headers,omitempty"`
 	CertExpiry time.Time `json:"cert_expiry,omitzero"`
+	Trackers   []string  `json:"trackers_before_consent,omitempty"`
 }
 
 // emptySHA is an empty file's sha256: an empty PHP file under uploads is a

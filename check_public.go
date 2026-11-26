@@ -37,5 +37,9 @@ func (c *checker) public() {
 			c.flag(Flag{ID: "headers:" + idPart(host) + ":" + short(s.Headers...), Severity: Review, Kind: KindPublic,
 				Message: "security headers missing on the home page", Untrusted: host + ": " + strings.Join(s.Headers, ", ")})
 		}
+		for _, t := range s.Trackers {
+			c.flag(Flag{ID: "consent-missing:" + idPart(host) + ":" + t, Severity: Review, Kind: KindPublic,
+				Message: "a tracker starts on the home page before any consent tool or consent default", Untrusted: host + ": " + t})
+		}
 	}
 }

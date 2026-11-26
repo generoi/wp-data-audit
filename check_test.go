@@ -419,7 +419,7 @@ func TestRetentionOrphanUploads(t *testing.T) {
 func TestPublic(t *testing.T) {
 	w := &WebFacts{Base: "https://site.example", Sites: []PublicSite{
 		{Home: "https://site.example", Users: []string{"jane"}, AuthorSlug: "jane", XMLRPC: true, Listing: true,
-			Headers: []string{"Strict-Transport-Security"}, CertExpiry: now.Add(5 * 24 * time.Hour)},
+			Headers: []string{"Strict-Transport-Security"}, CertExpiry: now.Add(5 * 24 * time.Hour), Trackers: []string{"gtm"}},
 		{Home: "https://down.example", Err: "connection refused"},
 	}}
 	r := Check(Input{Facts: Facts{At: now, Web: w}, Policy: Policy{Skip: Skip{Exposed: true}}}).Report
@@ -427,7 +427,7 @@ func TestPublic(t *testing.T) {
 	for _, f := range kind(r, KindPublic) {
 		sev[strings.SplitN(f.ID, ":", 2)[0]] = f.Severity
 	}
-	for k, want := range map[string]Severity{"cert": Urgent, "rest-users": Review, "author-enum": Review, "xmlrpc": Review, "listing": Urgent, "headers": Review} {
+	for k, want := range map[string]Severity{"cert": Urgent, "rest-users": Review, "author-enum": Review, "xmlrpc": Review, "listing": Urgent, "headers": Review, "consent-missing": Review} {
 		if sev[k] != want {
 			t.Errorf("%s: %q, want %s", k, sev[k], want)
 		}
