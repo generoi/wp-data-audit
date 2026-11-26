@@ -1,8 +1,9 @@
 // Package web asks a site's public URLs what they give away, from outside:
 // whether files that shouldn't be public are served, folders listed, users
-// listed, XML-RPC open, headers missing, the certificate about to expire. It
-// only reads (HEAD, one-byte GETs, a listing's first 8 KB) and never asks a
-// documentation or test domain (RFC 2606, 6761).
+// listed, XML-RPC open, headers missing, the certificate about to expire,
+// trackers starting before consent. It only reads (HEAD, one-byte GETs, a
+// listing's first 8 KB, the landing page and the tracker containers it loads)
+// and never asks a documentation or test domain (RFC 2606, 6761).
 package web
 
 import (
@@ -207,13 +208,15 @@ func (p *prober) listed(u string) (bool, string) {
 
 var authorRE = regexp.MustCompile(`/author/([^/?#]+)`)
 
-// site asks one home: the landing page's security headers and certificate,
-// the REST API's user list, ?author=1, XML-RPC (siteurl's xmlrpc.php,
-// system.listMethods) and the uploads folder's listing.
+// site asks one home: the landing page's security headers, certificate and
+// the trackers it starts before consent (with the GTM or Matomo container
+// they load, read from where a visitor's browser reads it), the REST API's
+// user list, ?author=1, XML-RPC (siteurl's xmlrpc.php, system.listMethods)
+// and the uploads folder's listing.
 func (p *prober) site(home, siteurl string) audit.PublicSite {
 	s := audit.PublicSite{Home: home}
 	// The whole landing page, not a range: some servers add security headers
-	// only to full answers. Only its headers are read.
+	// only to full answers.
 	resp, err := p.do(http.MethodGet, home+"/", nil, 0)
 	if err == nil && resp.StatusCode/100 == 3 { // http → https, or to www: the headers are the landing page's
 		done(resp)
@@ -224,6 +227,12 @@ func (p *prober) site(home, siteurl string) audit.PublicSite {
 	if err != nil {
 		s.Err = errText(err)
 		return s
+	}
+	// A page on another domain (a network's root sending visitors to a
+	// global site that isn't this install) isn't this site's to judge.
+	var page []byte
+	if resp.StatusCode == http.StatusOK && sameSite(home, resp.Request.URL.Hostname()) {
+		page, _ = io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	}
 	done(resp)
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
@@ -279,6 +288,7 @@ func (p *prober) site(home, siteurl string) audit.PublicSite {
 		uploads = home + "/app/uploads/"
 	}
 	s.Listing, _ = p.listed(uploads)
+	s.Trackers = p.trackers(page)
 	return s
 }
 
